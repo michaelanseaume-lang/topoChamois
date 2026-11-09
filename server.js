@@ -143,7 +143,7 @@ app.post('/api/register', throttle, (req, res) => {
   if (db.prepare('SELECT 1 FROM users WHERE pseudo = ?').get(pseudo)) return res.status(409).json({ error: 'Ce pseudo est déjà pris' });
   const first = db.prepare('SELECT COUNT(*) n FROM users').get().n === 0; // le premier inscrit est administrateur
   const id = db.prepare('INSERT INTO users(pseudo, hash, role, created_at) VALUES(?,?,?,?)')
-    .run(pseudo, bcrypt.hashSync(pw, 10), first ? 'admin' : (req.body.role === 'opener' ? 'opener' : 'user'), now()).lastInsertRowid;
+    .run(pseudo, bcrypt.hashSync(pw, 10), first ? 'admin' : 'user', now()).lastInsertRowid;
   setCookie(req, res, id);
   res.json({ user: userById.get(id) });
 });
@@ -309,14 +309,27 @@ app.post('/api/voies/:id/contest', auth, (req, res) => {
 });
 app.get('/api/voies/:id/comments', auth, (req, res) => {
   if (!voieById(req.params.id)) return res.status(404).json({ error: 'Voie introuvable' });
-  res.json({ comments: db.prepare(`SELECT c.id, u.pseudo, c.text, c.created_at FROM comments c JOIN users u ON u.id = c.user_id
-    WHERE c.voie_id = ? ORDER BY c.id`).all(req.params.id) });
+  res.json({ comments: db.prepare(`SELECT c.id, c.user_id, u.pseudo, c.text, c.created_at FROM comments c JOIN users u ON u.id = c.user_id
+    WHERE c.voie_id = ? ORDER BY c.id`).all(req.params.id)
+    .map(c => ({ id: c.id, pseudo: c.pseudo, text: c.text, created_at: c.created_at, mine: c.user_id === req.user.id })) });
 });
 app.post('/api/voies/:id/comments', auth, (req, res) => {
   const t = String(req.body.text || '').trim().slice(0, 500);
   if (!t) return res.status(400).json({ error: 'Commentaire vide' });
   if (!voieById(req.params.id)) return res.status(404).json({ error: 'Voie introuvable' });
   db.prepare('INSERT INTO comments(voie_id, user_id, text, created_at) VALUES(?,?,?,?)').run(req.params.id, req.user.id, t, now());
+  res.json({ ok: true });
+});
+
+app.delete('/api/comments/:id', auth, (req, res) => { // l'auteur supprime le sien ; l'admin modère tous les commentaires
+  const c = db.prepare('SELECT user_id FROM comments WHERE id = ?').get(req.params.id);
+  if (!c) return res.json({ ok: true });
+  if (c.user_id !== req.user.id && req.user.role !== 'admin') return res.status(403).json({ error: 'Vous ne pouvez supprimer que vos propres commentaires' });
+  db.prepare('DELETE FROM comments WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+app.delete('/api/sessions/:id', auth, (req, res) => { // supprime la session et ses ascensions (les statuts des voies restent)
+  db.prepare('DELETE FROM sessions WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
   res.json({ ok: true });
 });
 

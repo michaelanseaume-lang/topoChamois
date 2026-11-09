@@ -5,7 +5,7 @@ const GR = ['4', '5', '6', '7', '8'].flatMap(n => ['a', 'a+', 'b', 'b+', 'c', 'c
 const ST = [['avue', 'À vue'], ['flash', 'Flash'], ['apres', 'Après travail'], ['travail', 'Travail en cours'], ['non', 'Non réalisé']];
 const DONE = ['avue', 'flash', 'apres'];
 const ROLES = [['user', 'Grimpeur'], ['opener', 'Ouvreur'], ['admin', 'Admin']];
-const S = { user: null, tab: 'topo', open: null, draft: null, admin: false, auth: 'in', err: '', topo: null, profile: null, club: null, members: null, comments: [], videos: [], zoom: null, role: 'user' };
+const S = { user: null, tab: 'topo', open: null, draft: null, admin: false, auth: 'in', err: '', topo: null, profile: null, club: null, members: null, comments: [], videos: [], zoom: null };
 
 const e = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const ci = g => GR.indexOf(g);
@@ -96,7 +96,7 @@ function sheet() {
   <div class="sb"><h3>Cotation</h3><button class="chip ${v.vme ? 'on' : ''}" data-act="valid">✓ Cotation validée · ${v.validations}</button></div>
   <div class="sb"><h3>Cotation contestée ?</h3>${v.contests.map(c => `<div class="row" style="align-items:center;margin-bottom:6px"><span style="flex:1"><b>${c.grade}</b> <span class="mut">· ${c.n} pers.</span></span><button class="chip ${c.me ? 'on' : ''}" data-act="vote" data-v="${c.grade}">D’accord</button></div>`).join('')}<div class="row" style="margin-top:8px"><select id="pcot">${GR.filter(c => c !== v.grade).map(c => `<option>${c}</option>`).join('')}</select><button class="btn sec" style="white-space:nowrap" data-act="contest">Proposer</button></div></div>
   <div class="sb"><h3>Vidéos</h3>${S.videos.map(x => `<div style="margin-bottom:12px"><video controls playsinline preload="metadata" src="${x.url}" style="width:100%;max-height:60vh;border-radius:10px;background:#000"></video><div class="row" style="align-items:center"><span class="mut" style="flex:1">${e(x.pseudo)} · ${new Date(x.created_at).toLocaleDateString('fr-FR')}</span>${x.mine || isOpener() ? `<button class="chip" data-act="delvideo" data-v="${x.id}">Supprimer</button>` : ''}</div></div>`).join('') || '<p class="mut">Aucune vidéo pour cette voie.</p>'}<label class="chip">🎥 Ajouter une vidéo de ma réalisation<input type="file" accept="video/*" class="vh" data-up="video" data-id="${v.id}"></label></div>
-  <div class="sb"><h3>Commentaires</h3>${S.comments.map(c => `<p class="cm"><b>${e(c.pseudo)}</b> <small>${new Date(c.created_at).toLocaleDateString('fr-FR')}</small><br>${e(c.text)}</p>`).join('') || '<p class="mut">Aucun commentaire. Donnez votre bêta.</p>'}<div class="row"><input type="text" id="cm" placeholder="Votre commentaire" maxlength="500"><button class="btn" data-act="comment">Publier</button></div></div>`;
+  <div class="sb"><h3>Commentaires</h3>${S.comments.map(c => `<p class="cm"><b>${e(c.pseudo)}</b> <small>${new Date(c.created_at).toLocaleDateString('fr-FR')}</small>${c.mine || S.user.role === 'admin' ? ` <button class="chip" style="padding:1px 8px;font-size:12px" data-act="delcomment" data-v="${c.id}">Supprimer</button>` : ''}<br>${e(c.text)}</p>`).join('') || '<p class="mut">Aucun commentaire.</p>'}<div class="row"><input type="text" id="cm" placeholder="Votre commentaire" maxlength="500"><button class="btn" data-act="comment">Publier</button></div></div>`;
   return `<div class="ov" data-act="close"><div class="sheet" role="dialog" aria-label="Voie">
   <div class="sh" style="background:${COL[v.color]};color:${fg(v.color)}"><div style="flex:1"><div style="opacity:.8">Relais ${rel}</div><h2>${v.grade}</h2><div>${e(v.name || 'Voie sans nom')}</div></div><button class="pill" style="color:inherit;border-color:currentColor" data-act="close">Fermer</button></div>${body}</div></div>`;
 }
@@ -107,7 +107,7 @@ function sessionChips(list) {
 function sessionView() {
   const p = S.profile, a = p.session;
   return `<div class="box"><h2 style="font-size:22px;margin-bottom:8px">${a ? 'Session en cours' : 'Nouvelle session'}</h2>${a ? `<div class="sts" style="margin-bottom:12px">${sessionChips(a.asc) || '<span class="mut">Ouvrez une voie et choisissez un statut pour l’ajouter.</span>'}</div><button class="btn" data-act="endsess">Terminer la session</button>` : `<p class="mut" style="margin-top:0">Démarrez une session, puis notez vos voies depuis le topo.</p><button class="btn" data-act="startsess">Démarrer</button>`}</div>
-  <h3 style="margin:18px 0 10px">Sessions passées</h3>${p.sessions.map(s => `<div class="box"><b>${dateFr(s.started)}</b><div class="mut" style="margin:2px 0 8px">${s.asc.filter(x => DONE.includes(x.status)).length} ascension(s)</div><div class="sts">${sessionChips(s.asc)}</div></div>`).join('') || '<p class="mut">Aucune session terminée pour le moment.</p>'}`;
+  <h3 style="margin:18px 0 10px">Sessions passées</h3>${p.sessions.map(s => `<div class="box"><div class="row" style="align-items:center"><b style="flex:1">${dateFr(s.started)}</b><button class="chip" data-act="delsess" data-v="${s.id}">Supprimer</button></div><div class="mut" style="margin:2px 0 8px">${s.asc.filter(x => DONE.includes(x.status)).length} ascension(s)</div><div class="sts">${sessionChips(s.asc)}</div></div>`).join('') || '<p class="mut">Aucune session terminée pour le moment.</p>'}`;
 }
 
 function profilView() {
@@ -131,7 +131,7 @@ function clubView() {
 }
 
 function loginView() {
-  return `<button class="chip" style="position:fixed;top:12px;right:12px" data-act="theme">${themeLabel()}</button><div class="login"><h1>Topo du mur</h1><p class="mut">Toutes les voies du club, vos ascensions, vos sessions.</p><div class="box"><div class="bar"><button class="chip ${S.auth === 'in' ? 'on' : ''}" data-act="auth" data-v="in">Se connecter</button><button class="chip ${S.auth === 'up' ? 'on' : ''}" data-act="auth" data-v="up">Créer un compte</button></div><input type="text" id="pseudo" placeholder="Pseudo" autocomplete="username" maxlength="20"><input type="password" id="pw" placeholder="Mot de passe" autocomplete="${S.auth === 'in' ? 'current-password' : 'new-password'}">${S.auth === 'up' ? `<div class="mut" style="margin:8px 0 4px">Je suis…</div><div class="bar" style="margin-bottom:0"><button class="chip ${S.role === 'user' ? 'on' : ''}" data-act="setrole" data-v="user">Grimpeur</button><button class="chip ${S.role === 'opener' ? 'on' : ''}" data-act="setrole" data-v="opener">Ouvreur</button></div>` : ''}${S.err ? `<p class="err">${e(S.err)}</p>` : ''}<button class="btn" style="width:100%;margin-top:8px" data-act="login">${S.auth === 'in' ? 'Se connecter' : 'Créer mon compte'}</button><p class="mut" style="margin-bottom:0">Pas d’e-mail nécessaire.</p></div></div>`;
+  return `<button class="chip" style="position:fixed;top:12px;right:12px" data-act="theme">${themeLabel()}</button><div class="login"><h1>Topo du mur</h1><p class="mut">Toutes les voies du club, vos ascensions, vos sessions.</p><div class="box"><div class="bar"><button class="chip ${S.auth === 'in' ? 'on' : ''}" data-act="auth" data-v="in">Se connecter</button><button class="chip ${S.auth === 'up' ? 'on' : ''}" data-act="auth" data-v="up">Créer un compte</button></div><input type="text" id="pseudo" placeholder="Pseudo" autocomplete="username" maxlength="20"><input type="password" id="pw" placeholder="Mot de passe" autocomplete="${S.auth === 'in' ? 'current-password' : 'new-password'}">${S.err ? `<p class="err">${e(S.err)}</p>` : ''}<button class="btn" style="width:100%;margin-top:8px" data-act="login">${S.auth === 'in' ? 'Se connecter' : 'Créer mon compte'}</button></div></div>`;
 }
 
 const themeNow = () => document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
@@ -166,13 +166,14 @@ document.addEventListener('click', async ev => {
       try { localStorage.setItem('theme', n); } catch { }
       return render();
     }
-    if (a === 'setrole') { S.role = v; document.querySelectorAll('[data-act="setrole"]').forEach(b => b.classList.toggle('on', b.dataset.v === v)); return; }
     if (a === 'myrole') { S.user = (await api('PUT', '/api/me/role', { role: v })).user; if (v === 'user') S.admin = false; return await load(); }
     if (a === 'delaccount') {
       if (!confirm('Supprimer définitivement votre compte ? Cette action est irréversible.')) return;
       await api('DELETE', '/api/me', { password: val('delpw') });
       Object.assign(S, { user: null, topo: null, profile: null, club: null, open: null, draft: null, admin: false, auth: 'in', err: '' }); return render();
     }
+    if (a === 'delcomment') { if (!confirm('Supprimer ce commentaire ?')) return; await api('DELETE', `/api/comments/${v}`); return await load(); }
+    if (a === 'delsess') { if (!confirm('Supprimer cette session ? Ses ascensions ne compteront plus dans vos statistiques (les statuts de vos voies restent).')) return; await api('DELETE', `/api/sessions/${v}`); return await load(); }
     if (a === 'zoom') { S.zoom = v; return render(); }
     if (a === 'unzoom') { S.zoom = null; return render(); }
     if (a === 'delphoto') { if (!confirm('Supprimer la photo de ce relais ?')) return; await api('DELETE', `/api/relais/${v}/photo`); return await load(); }
@@ -180,7 +181,7 @@ document.addEventListener('click', async ev => {
     if (a === 'auth') { S.auth = v; S.err = ''; return render(); }
     if (a === 'login') {
       try {
-        const d = await api('POST', S.auth === 'in' ? '/api/login' : '/api/register', { pseudo: val('pseudo'), password: val('pw'), role: S.role });
+        const d = await api('POST', S.auth === 'in' ? '/api/login' : '/api/register', { pseudo: val('pseudo'), password: val('pw') });
         S.user = d.user; S.err = ''; S.tab = 'topo'; S.admin = isOpener() && adminPref(); return await load();
       } catch (er) { S.err = er.message; return render(); }
     }
