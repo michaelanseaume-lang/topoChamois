@@ -61,12 +61,38 @@ CREATE TABLE IF NOT EXISTS videos(
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, file TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_voies_relais ON voies(relais_id);
 CREATE INDEX IF NOT EXISTS idx_videos_voie ON videos(voie_id);
+-- Journal des voies grimpées (durable : survit à la suppression de la voie) et des voies ouvertes, pour les succès
+CREATE TABLE IF NOT EXISTS climbs(
+  id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  voie_id INTEGER REFERENCES voies(id) ON DELETE SET NULL, grade TEXT NOT NULL, color TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_climbs_user ON climbs(user_id);
+CREATE INDEX IF NOT EXISTS idx_climbs_voie ON climbs(voie_id);
+CREATE TABLE IF NOT EXISTS openings(
+  id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  voie_id INTEGER UNIQUE REFERENCES voies(id) ON DELETE SET NULL, created_at TEXT NOT NULL);
+-- Championnat mensuel : journal des points (valeur figée à l'attribution), clôtures, résultats et médailles
+CREATE TABLE IF NOT EXISTS points(
+  id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, period TEXT NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL,
+  points INTEGER NOT NULL, label TEXT NOT NULL, voie_id INTEGER REFERENCES voies(id) ON DELETE SET NULL,
+  session_id INTEGER REFERENCES sessions(id) ON DELETE SET NULL, created_at TEXT NOT NULL, UNIQUE(user_id, period, kind, ref));
+CREATE INDEX IF NOT EXISTS idx_points_period ON points(period, user_id);
+CREATE TABLE IF NOT EXISTS championships(period TEXT PRIMARY KEY, closed_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS results(
+  period TEXT NOT NULL REFERENCES championships(period), user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  rank INTEGER NOT NULL, points INTEGER NOT NULL, medal TEXT, seen INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(period, user_id));
+CREATE TABLE IF NOT EXISTS opening_events(id INTEGER PRIMARY KEY, date TEXT NOT NULL, created_by INTEGER REFERENCES users(id) ON DELETE SET NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS user_achievements(
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, key TEXT NOT NULL,
+  unlocked_at TEXT NOT NULL, seen INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id, key));
 CREATE INDEX IF NOT EXISTS idx_ascents_user ON ascents(user_id);
 `);
 
 // Migration : bases créées avant l'ajout des photos de relais
 if (!db.prepare("SELECT 1 FROM pragma_table_info('relais') WHERE name = 'photo'").get())
   db.exec('ALTER TABLE relais ADD COLUMN photo TEXT; ALTER TABLE relais ADD COLUMN photo_by INTEGER REFERENCES users(id) ON DELETE SET NULL');
+
+if (!db.prepare("SELECT 1 FROM pragma_table_info('statuses') WHERE name = 'tries'").get())
+  db.exec('ALTER TABLE statuses ADD COLUMN tries INTEGER NOT NULL DEFAULT 0; ALTER TABLE statuses ADD COLUMN worked_at TEXT');
 
 // ---------- Fichiers envoyés (photos de relais, vidéos de voies) ----------
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(path.dirname(DB_PATH), 'uploads');
@@ -96,6 +122,32 @@ const DONE = ['avue', 'flash', 'apres'];
 const DONE_SQL = DONE.map(s => `'${s}'`).join(',');
 const gi = g => GRADES.indexOf(g);
 const now = () => new Date().toISOString();
+const isDone = s => DONE.includes(s);
+const ach = require('./achievements')(db, { GRADES, DONE_SQL });
+const champ = require('./championship')(db, { GRADES });
+champ.closeMonths();
+setInterval(() => { try { champ.closeMonths(); } catch (e) { console.error(e); } }, 3600 * 1000).unref(); // clôture automatique au changement de mois
+
+// Ouvreur d'une voie = utilisateur dont le pseudo correspond au champ « ouvreur » (le pseudo est pré-rempli à la création)
+function syncOpening(voieId, setter) {
+  const u = db.prepare('SELECT id FROM users WHERE pseudo = ?').get(setter);
+  if (u) db.prepare(`INSERT INTO openings(user_id, voie_id, created_at) VALUES(?,?,?)
+    ON CONFLICT(voie_id) DO UPDATE SET user_id = excluded.user_id`).run(u.id, voieId, now());
+}
+function addClimb(uid, v, status) {
+  db.prepare('INSERT INTO climbs(user_id, voie_id, grade, color, status, created_at) VALUES(?,?,?,?,?,?)').run(uid, v.id, v.grade, v.color, status, now());
+}
+const lastClimb = (uid, vid) => db.prepare('SELECT id FROM climbs WHERE user_id = ? AND voie_id = ? ORDER BY id DESC LIMIT 1').get(uid, vid);
+function syncClimb(uid, v, prev, st) { // une voie réussie = une entrée au journal ; annuler le statut l'annule
+  if (isDone(st) && !isDone(prev)) addClimb(uid, v, st);
+  else if (isDone(st) && prev !== st) { const l = lastClimb(uid, v.id); if (l) db.prepare('UPDATE climbs SET status = ? WHERE id = ?').run(st, l.id); }
+  else if (!isDone(st) && isDone(prev)) { const l = lastClimb(uid, v.id); if (l) db.prepare('DELETE FROM climbs WHERE id = ?').run(l.id); }
+}
+// Reprise de l'existant au premier démarrage avec cette version
+db.prepare(`INSERT INTO climbs(user_id, voie_id, grade, color, status, created_at)
+  SELECT s.user_id, s.voie_id, v.grade, v.color, s.status, s.updated_at FROM statuses s JOIN voies v ON v.id = s.voie_id
+  WHERE s.status IN (${DONE_SQL}) AND NOT EXISTS (SELECT 1 FROM climbs)`).run();
+if (!db.prepare('SELECT 1 FROM openings LIMIT 1').get()) db.prepare('SELECT id, setter FROM voies').all().forEach(v => syncOpening(v.id, v.setter));
 
 // ---------- Auth (cookie signé, sans dépendance) ----------
 const COOKIE = 'tok', MAX_AGE = 30 * 24 * 3600;
@@ -179,11 +231,15 @@ const activeSession = uid => db.prepare('SELECT * FROM sessions WHERE user_id = 
 
 app.get('/api/topo', auth, (req, res) => {
   const uid = req.user.id;
+  champ.closeMonths();
+  ach.evaluate(uid);
   const total = db.prepare('SELECT COUNT(*) n FROM users').get().n;
   const map = (sql, ...a) => Object.fromEntries(db.prepare(sql).all(...a).map(r => [r.k, r.n]));
   const done = map(`SELECT voie_id k, COUNT(*) n FROM statuses WHERE status IN (${DONE_SQL}) GROUP BY voie_id`);
   const vals = map('SELECT voie_id k, COUNT(*) n FROM validations GROUP BY voie_id');
   const vids = map('SELECT voie_id k, COUNT(*) n FROM videos GROUP BY voie_id');
+  const clm = map('SELECT voie_id k, COUNT(DISTINCT user_id) n FROM climbs WHERE voie_id IS NOT NULL GROUP BY voie_id');
+  const myDone = new Set(db.prepare(`SELECT voie_id FROM statuses WHERE user_id = ? AND status IN (${DONE_SQL})`).all(uid).map(r => r.voie_id)), scored = champ.scoredSet(uid);
   const myVals = new Set(db.prepare('SELECT voie_id FROM validations WHERE user_id = ?').all(uid).map(r => r.voie_id));
   const contests = {};
   db.prepare('SELECT voie_id, grade, COUNT(*) n, SUM(user_id = ?) me FROM contests GROUP BY voie_id, grade ORDER BY n DESC').all(uid)
@@ -192,14 +248,15 @@ app.get('/api/topo', auth, (req, res) => {
   db.prepare('SELECT * FROM voies ORDER BY id').all().forEach(v => (voies[v.relais_id] ||= []).push({
     id: v.id, color: v.color, grade: v.grade, name: v.name, setter: v.setter,
     pct: total ? Math.round((done[v.id] || 0) / total * 100) : 0,
-    validations: vals[v.id] || 0, videos: vids[v.id] || 0, vme: myVals.has(v.id), contests: contests[v.id] || []
+    validations: vals[v.id] || 0, videos: vids[v.id] || 0, ...champ.valueInfo(v.grade, (clm[v.id] || 0) - (myDone.has(v.id) ? 1 : 0)), scored: scored.has(v.id), vme: myVals.has(v.id), contests: contests[v.id] || []
   }));
   const relais = db.prepare('SELECT * FROM relais ORDER BY num').all().map(r => ({
     id: r.id, num: r.num, voies: voies[r.id] || [],
     photo: r.photo ? `/media/${r.photo}` : null, photo_mine: !!r.photo && r.photo_by === uid }));
-  const my = Object.fromEntries(db.prepare('SELECT voie_id, status FROM statuses WHERE user_id = ?').all(uid).map(r => [r.voie_id, r.status]));
+  const myRows = db.prepare('SELECT voie_id, status, tries FROM statuses WHERE user_id = ?').all(uid);
+  const my = Object.fromEntries(myRows.map(r => [r.voie_id, r.status])), tries = Object.fromEntries(myRows.map(r => [r.voie_id, r.tries]));
   const s = activeSession(uid);
-  res.json({ relais, my, session: s ? { id: s.id } : null, total, limits: { photo: MAX_PHOTO_MB, video: MAX_VIDEO_MB } });
+  res.json({ relais, my, tries, ach: ach.unseen(uid), champ: champ.unseen(uid), session: s ? { id: s.id } : null, total, limits: { photo: MAX_PHOTO_MB, video: MAX_VIDEO_MB } });
 });
 
 app.post('/api/relais', auth, opener, (req, res) => {
@@ -226,6 +283,7 @@ app.post('/api/relais/:id/voies', auth, opener, (req, res) => {
   if (!db.prepare('SELECT 1 FROM relais WHERE id = ?').get(req.params.id)) return res.status(404).json({ error: 'Relais introuvable' });
   const id = db.prepare('INSERT INTO voies(relais_id, color, grade, name, setter, created_at) VALUES(?,?,?,?,?,?)')
     .run(req.params.id, c.color, c.grade, c.name, c.setter, now()).lastInsertRowid;
+  syncOpening(id, c.setter);
   res.json({ id });
 });
 app.put('/api/voies/:id', auth, opener, (req, res) => {
@@ -234,6 +292,7 @@ app.put('/api/voies/:id', auth, opener, (req, res) => {
   if (!c) return res.status(400).json({ error: 'Couleur ou cotation invalide' });
   db.transaction(() => {
     db.prepare('UPDATE voies SET color=?, grade=?, name=?, setter=? WHERE id=?').run(c.color, c.grade, c.name, c.setter, v.id);
+    syncOpening(v.id, c.setter);
     if (c.grade !== v.grade) { // la cotation a changé : on repart de zéro côté validations / contestations
       db.prepare('DELETE FROM validations WHERE voie_id = ?').run(v.id);
       db.prepare('DELETE FROM contests WHERE voie_id = ?').run(v.id);
@@ -262,15 +321,29 @@ function addAscent(sessionId, uid, v, status) {
 app.put('/api/voies/:id/status', auth, (req, res) => {
   const v = voieById(req.params.id), uid = req.user.id, st = req.body.status;
   if (!v) return res.status(404).json({ error: 'Voie introuvable' });
-  if (!st) { db.prepare('DELETE FROM statuses WHERE user_id = ? AND voie_id = ?').run(uid, v.id); return res.json({ ok: true }); }
+  const prev = (db.prepare('SELECT status FROM statuses WHERE user_id = ? AND voie_id = ?').get(uid, v.id) || {}).status;
+  if (!st) {
+    db.prepare('DELETE FROM statuses WHERE user_id = ? AND voie_id = ?').run(uid, v.id);
+    syncClimb(uid, v, prev, null);
+    return res.json({ ok: true });
+  }
   if (!STATUSES.includes(st)) return res.status(400).json({ error: 'Statut invalide' });
-  db.prepare(`INSERT INTO statuses(user_id, voie_id, status, updated_at) VALUES(?,?,?,?)
-    ON CONFLICT(user_id, voie_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at`).run(uid, v.id, st, now());
+  db.prepare(`INSERT INTO statuses(user_id, voie_id, status, updated_at, worked_at) VALUES(?,?,?,?,?)
+    ON CONFLICT(user_id, voie_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at,
+      worked_at = COALESCE(statuses.worked_at, excluded.worked_at)`).run(uid, v.id, st, now(), st === 'travail' ? now() : null);
+  syncClimb(uid, v, prev, st);
   const s = activeSession(uid);
+  if (isDone(st) && !isDone(prev)) champ.scoreClimb(uid, v, st, s && s.id); // points enregistrés à la validation de la réussite
   if (s && st !== 'non') {
     const last = db.prepare('SELECT id FROM ascents WHERE session_id = ? AND voie_id = ? ORDER BY id DESC LIMIT 1').get(s.id, v.id);
     if (last) db.prepare('UPDATE ascents SET status = ? WHERE id = ?').run(st, last.id); else addAscent(s.id, uid, v, st);
   }
+  res.json({ ok: true });
+});
+app.put('/api/voies/:id/tries', auth, (req, res) => { // compteur d'essais (utile pour « après travail »)
+  const n = Math.max(0, Math.min(99, parseInt(req.body.tries, 10) || 0));
+  const r = db.prepare('UPDATE statuses SET tries = ? WHERE user_id = ? AND voie_id = ?').run(n, req.user.id, req.params.id);
+  if (!r.changes) return res.status(400).json({ error: 'Choisissez d’abord un statut' });
   res.json({ ok: true });
 });
 app.post('/api/voies/:id/repeat', auth, (req, res) => { // « refaite pendant la session »
@@ -278,6 +351,7 @@ app.post('/api/voies/:id/repeat', auth, (req, res) => { // « refaite pendant la
   const st = db.prepare('SELECT status FROM statuses WHERE user_id = ? AND voie_id = ?').get(uid, req.params.id);
   if (!v || !s || !st || st.status === 'non') return res.status(400).json({ error: 'Session et statut requis' });
   addAscent(s.id, uid, v, st.status);
+  if (isDone(st.status)) addClimb(uid, v, st.status);
   res.json({ ok: true });
 });
 app.post('/api/voies/:id/validate', auth, (req, res) => { // une seule voix par personne : validation OU contestation
@@ -379,6 +453,23 @@ app.get('/media/:file', auth, (req, res) => {
     err => { if (err && !res.headersSent) res.status(404).end(); });
 });
 
+// ---------- Championnat mensuel ----------
+app.get('/api/championship', auth, (req, res) => res.json(champ.championship(req.user.id)));
+app.get('/api/hall', auth, (_req, res) => res.json({ records: champ.hall() }));
+app.post('/api/championship/seen', auth, (req, res) => { champ.markSeen(req.user.id); res.json({ ok: true }); });
+app.post('/api/opening-events', auth, admin, (req, res) => { // séance d'ouverture : +50 pts aux participants cochés par un admin
+  const ids = (Array.isArray(req.body.user_ids) ? req.body.user_ids : []).map(Number).filter(Boolean);
+  if (!ids.length) return res.status(400).json({ error: 'Sélectionnez au moins un participant' });
+  res.json({ ok: true, awarded: champ.awardOpeningEvent(req.user.id, ids) });
+});
+
+// ---------- Succès ----------
+app.get('/api/achievements', auth, (req, res) => {
+  const list = ach.list(req.user.id);
+  res.json({ list, unlocked: list.filter(a => a.done).length, total: list.length });
+});
+app.post('/api/achievements/seen', auth, (req, res) => { ach.markSeen(req.user.id); res.json({ ok: true }); });
+
 // ---------- Sessions & stats ----------
 app.post('/api/sessions/start', auth, (req, res) => {
   if (!activeSession(req.user.id)) db.prepare('INSERT INTO sessions(user_id, started_at) VALUES(?,?)').run(req.user.id, now());
@@ -414,7 +505,7 @@ app.get('/api/profile', auth, (req, res) => {
     .all().forEach(a => (byS[a.session_id] ||= []).push(a));
   const out = sessions.map(s => ({ id: s.id, started: s.started_at, ended: s.ended_at, asc: byS[s.id] || [] }));
   res.json({
-    stats: { asc, done: DONE.reduce((n, s) => n + counts[s], 0), best, counts, top },
+    champ: champ.mine(uid), stats: { asc, done: DONE.reduce((n, s) => n + counts[s], 0), best, counts, top },
     session: out.find(s => !s.ended) || null, sessions: out.filter(s => s.ended)
   });
 });
@@ -422,8 +513,9 @@ app.get('/api/profile', auth, (req, res) => {
 app.get('/api/club', auth, (_req, res) => {
   const rows = doneGrades();
   const ascN = Object.fromEntries(db.prepare(`SELECT user_id k, COUNT(*) n FROM ascents WHERE status IN (${DONE_SQL}) GROUP BY user_id`).all().map(r => [r.k, r.n]));
+  const achN = Object.fromEntries(db.prepare('SELECT user_id k, COUNT(*) n FROM user_achievements GROUP BY user_id').all().map(r => [r.k, r.n]));
   const users = db.prepare('SELECT id, pseudo FROM users').all().map(u => ({
-    id: u.id, pseudo: u.pseudo, best: bestOf(rows.filter(r => r.uid === u.id)), asc: ascN[u.id] || 0 }));
+    id: u.id, pseudo: u.pseudo, best: bestOf(rows.filter(r => r.uid === u.id)), asc: ascN[u.id] || 0, ach: achN[u.id] || 0 }));
   const nV = db.prepare('SELECT COUNT(*) n FROM voies').get().n;
   const nDone = db.prepare(`SELECT COUNT(*) n FROM statuses WHERE status IN (${DONE_SQL})`).get().n;
   const doneBy = Object.fromEntries(db.prepare(`SELECT voie_id k, COUNT(*) n FROM statuses WHERE status IN (${DONE_SQL}) GROUP BY voie_id`).all().map(r => [r.k, r.n]));
