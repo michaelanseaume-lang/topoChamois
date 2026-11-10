@@ -149,6 +149,34 @@ db.prepare(`INSERT INTO climbs(user_id, voie_id, grade, color, status, created_a
   WHERE s.status IN (${DONE_SQL}) AND NOT EXISTS (SELECT 1 FROM climbs)`).run();
 if (!db.prepare('SELECT 1 FROM openings LIMIT 1').get()) db.prepare('SELECT id, setter FROM voies').all().forEach(v => syncOpening(v.id, v.setter));
 
+// ---------- Sauvegarde quotidienne de la base (on garde les N dernières) ----------
+const BACKUP_DIR = process.env.BACKUP_DIR || path.join(path.dirname(DB_PATH), 'backups');
+const BACKUP_KEEP = Math.max(1, Number(process.env.BACKUP_KEEP) || 10);
+const BACKUP_RE = /^topo-\d{4}-\d{2}-\d{2}\.db$/;
+const dayFmt = new Intl.DateTimeFormat('en-CA', { timeZone: process.env.APP_TZ || 'Europe/Paris', year: 'numeric', month: '2-digit', day: '2-digit' });
+let backingUp = false;
+async function dailyBackup() { // une sauvegarde par jour : topo-AAAA-MM-JJ.db ; les plus anciennes au-delà de BACKUP_KEEP sont supprimées
+  if (backingUp) return;
+  backingUp = true;
+  const file = path.join(BACKUP_DIR, `topo-${dayFmt.format(new Date())}.db`);
+  try {
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    if (!fs.existsSync(file)) {
+      await db.backup(file + '.tmp'); // copie cohérente, même pendant que le site tourne
+      const copy = new Database(file + '.tmp'); copy.pragma('journal_mode = DELETE'); copy.close(); // fichier autonome (sans -wal / -shm)
+      fs.renameSync(file + '.tmp', file);
+      console.log('Sauvegarde créée :', file);
+    }
+    fs.readdirSync(BACKUP_DIR).filter(f => BACKUP_RE.test(f)).sort().reverse().slice(BACKUP_KEEP)
+      .forEach(f => { for (const x of [f, f + '-wal', f + '-shm']) try { fs.unlinkSync(path.join(BACKUP_DIR, x)); } catch { } console.log('Ancienne sauvegarde supprimée :', f); });
+  } catch (e) {
+    console.error('Sauvegarde impossible :', e.message);
+    try { fs.unlinkSync(file + '.tmp'); } catch { }
+  } finally { backingUp = false; }
+}
+dailyBackup();
+setInterval(dailyBackup, 3600 * 1000).unref(); // vérifie toutes les heures : crée celle du jour si elle manque
+
 // ---------- Auth (cookie signé, sans dépendance) ----------
 const COOKIE = 'tok', MAX_AGE = 30 * 24 * 3600;
 const hmac = s => crypto.createHmac('sha256', SECRET).update(s).digest('hex');
