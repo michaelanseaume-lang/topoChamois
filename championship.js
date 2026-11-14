@@ -54,13 +54,6 @@ module.exports = function (db, { GRADES }) {
       if (n === 10) add(uid, period, 's10', sessionId, 75, '10 nouvelles voies dans la séance', null, sessionId);
     }
   }
-  function awardOpeningEvent(adminId, userIds) { // séance d'ouverture : +50 pts par participant (validée par un admin)
-    const period = periodOf(new Date());
-    const id = db.prepare('INSERT INTO opening_events(date, created_by, created_at) VALUES(?,?,?)').run(now().slice(0, 10), adminId, now()).lastInsertRowid;
-    let n = 0;
-    userIds.forEach(u => { if (db.prepare('SELECT 1 FROM users WHERE id = ?').get(u) && add(u, period, 'event', id, 50, 'Séance d’ouverture', null, null)) n++; });
-    return n;
-  }
   const scoredSet = uid => new Set(db.prepare("SELECT ref FROM points WHERE user_id = ? AND period = ? AND kind = 'voie'").all(uid, periodOf(new Date())).map(r => Number(r.ref)));
 
   // ---- Classements ----
@@ -108,5 +101,5 @@ module.exports = function (db, { GRADES }) {
   }
   const unseen = uid => db.prepare('SELECT period, rank, points, medal FROM results WHERE user_id = ? AND seen = 0 ORDER BY period').all(uid);
   const markSeen = uid => db.prepare('UPDATE results SET seen = 1 WHERE user_id = ?').run(uid);
-  return { valueInfo, scoreClimb, scoredSet, closeMonths, mine, championship, hall, unseen, markSeen, awardOpeningEvent, periodOf };
+  return { valueInfo, scoreClimb, scoredSet, closeMonths, mine, championship, hall, unseen, markSeen, periodOf };
 };

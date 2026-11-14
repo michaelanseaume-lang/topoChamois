@@ -80,7 +80,6 @@ CREATE TABLE IF NOT EXISTS championships(period TEXT PRIMARY KEY, closed_at TEXT
 CREATE TABLE IF NOT EXISTS results(
   period TEXT NOT NULL REFERENCES championships(period), user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   rank INTEGER NOT NULL, points INTEGER NOT NULL, medal TEXT, seen INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(period, user_id));
-CREATE TABLE IF NOT EXISTS opening_events(id INTEGER PRIMARY KEY, date TEXT NOT NULL, created_by INTEGER REFERENCES users(id) ON DELETE SET NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS user_achievements(
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, key TEXT NOT NULL,
   unlocked_at TEXT NOT NULL, seen INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id, key));
@@ -485,12 +484,6 @@ app.get('/media/:file', auth, (req, res) => {
 app.get('/api/championship', auth, (req, res) => res.json(champ.championship(req.user.id)));
 app.get('/api/hall', auth, (_req, res) => res.json({ records: champ.hall() }));
 app.post('/api/championship/seen', auth, (req, res) => { champ.markSeen(req.user.id); res.json({ ok: true }); });
-app.post('/api/opening-events', auth, admin, (req, res) => { // séance d'ouverture : +50 pts aux participants cochés par un admin
-  const ids = (Array.isArray(req.body.user_ids) ? req.body.user_ids : []).map(Number).filter(Boolean);
-  if (!ids.length) return res.status(400).json({ error: 'Sélectionnez au moins un participant' });
-  res.json({ ok: true, awarded: champ.awardOpeningEvent(req.user.id, ids) });
-});
-
 // ---------- Succès ----------
 app.get('/api/achievements', auth, (req, res) => {
   const list = ach.list(req.user.id);

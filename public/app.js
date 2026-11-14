@@ -5,7 +5,7 @@ const GR = ['4', '5', '6', '7', '8'].flatMap(n => ['a', 'a+', 'b', 'b+', 'c', 'c
 const ST = [['avue', 'À vue'], ['flash', 'Flash'], ['apres', 'Après travail'], ['travail', 'Travail en cours'], ['non', 'Non réalisé']];
 const DONE = ['avue', 'flash', 'apres'];
 const ROLES = [['user', 'Grimpeur'], ['opener', 'Ouvreur'], ['admin', 'Admin']];
-const S = { user: null, tab: 'topo', open: null, draft: null, admin: false, auth: 'in', err: '', topo: null, profile: null, club: null, members: null, comments: [], videos: [], zoom: null, ach: null, newAch: null, clubTab: 'champ', champ: null, hall: null, newChamp: null };
+const S = { user: null, tab: 'topo', open: null, draft: null, admin: false, auth: 'in', err: '', topo: null, profile: null, club: null, members: null, comments: [], videos: [], zoom: null, ach: null, newAch: null, clubTab: 'champ', fl: [], champ: null, hall: null, newChamp: null };
 
 const e = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const ci = g => GR.indexOf(g);
@@ -81,9 +81,10 @@ function photoBlock(r) {
 }
 
 function topo() {
-  const rs = S.topo.relais;
-  return `${canEdit() ? `<div class="bar"><button class="btn" data-act="addrel">+ Relais</button></div>` : ''}
-  <div class="grid">${rs.map(r => `<section class="rel"><header><h3>Relais ${r.num}</h3>${canEdit() ? `<button class="btn del" style="padding:4px 10px;font-size:12px" data-act="delrel" data-v="${r.id}">Supprimer</button>` : ''}</header>${photoBlock(r)}${r.voies.map(voieRow).join('') || '<p class="mut" style="padding:0 14px">Aucune voie.</p>'}${canEdit() ? `<button class="add" data-act="addvoie" data-v="${r.id}">+ Ajouter une voie</button>` : ''}</section>`).join('')}</div>${rs.length ? '' : `<p class="mut">Le mur est vide.${isOpener() ? ' Activez le mode ouvreur pour ajouter un relais.' : ''}</p>`}`;
+  const lv = S.fl;
+  const rs = S.topo.relais.map(r => ({ ...r, voies: lv.length ? r.voies.filter(v => lv.includes(v.grade[0])) : r.voies })).filter(r => !lv.length || r.voies.length);
+  return `<div class="bar" role="group" aria-label="Filtrer par niveau"><button class="chip ${lv.length ? '' : 'on'}" data-act="fl" data-v="">Tous</button>${['4', '5', '6', '7', '8'].map(n => `<button class="chip ${lv.includes(n) ? 'on' : ''}" data-act="fl" data-v="${n}" aria-pressed="${lv.includes(n)}">${n}</button>`).join('')}${canEdit() ? `<button class="btn" style="margin-left:auto" data-act="addrel">+ Relais</button>` : ''}</div>
+  <div class="grid">${rs.map(r => `<section class="rel"><header><h3>Relais ${r.num}</h3>${canEdit() ? `<button class="btn del" style="padding:4px 10px;font-size:12px" data-act="delrel" data-v="${r.id}">Supprimer</button>` : ''}</header>${photoBlock(r)}${r.voies.map(voieRow).join('') || '<p class="mut" style="padding:0 14px">Aucune voie.</p>'}${canEdit() ? `<button class="add" data-act="addvoie" data-v="${r.id}">+ Ajouter une voie</button>` : ''}</section>`).join('')}</div>${rs.length ? '' : `<p class="mut">${S.topo.relais.length ? 'Aucune voie dans ces niveaux.' : 'Le mur est vide.' + (isOpener() ? ' Activez le mode ouvreur pour ajouter un relais.' : '')}</p>`}`;
 }
 
 function sheet() {
@@ -172,9 +173,8 @@ function champView() {
   <div class="grid"><div class="box"><h3 style="margin-bottom:8px">Classement du mois</h3>${rows || '<p class="mut" style="margin:0">Personne n’a encore marqué de points ce mois-ci. À vous de jouer !</p>'}</div>
   <div class="box"><h3 style="margin-bottom:8px">Mes derniers points</h3>${me.entries.map(x => `<div class="row" style="padding:4px 0"><span style="flex:1" class="mut">${e(x.label)}</span><b>+${x.points}</b></div>`).join('') || '<p class="mut" style="margin:0">Réussissez une voie pour marquer vos premiers points.</p>'}</div>
   <div class="box"><h3 style="margin-bottom:8px">Explorateurs du mois</h3>${small(c.explorers, x => x.n + ' voies')}<h3 style="margin:14px 0 8px">Premières ascensions</h3>${small(c.firsts, x => x.n)}</div></div>
-  <details class="box"><summary>Comment sont calculés les points ?</summary><p class="mut">Chaque voie vaut des <b>points de base</b> selon sa cotation (4 : 10 · 5 : 20 · 6a-6b+ : 35 · 6c-7a+ : 50 · 7b-7c+ : 70 · 8a et + : 100), multipliés par un <b>coefficient de popularité</b> : plus la voie a été réussie par de membres différents, moins elle rapporte (de ×2 pour une voie peu réussie à ×0,25 au-delà de 100 réussites). Une voie vaut toujours au moins 5 points. Les répétitions ne comptent pas, et une voie ne rapporte qu’une fois par mois.</p><p class="mut"><b>Bonus :</b> +20 % si réussie du premier coup (à vue ou flash) · +30 pts première ascension de la voie · +30 pts à l’ouvreur quand quelqu’un réussit sa voie pour la première fois · +50 pts pour une cotation supérieure à votre meilleure · +30 pts pour 5 nouvelles voies dans une séance, +75 pts pour 10 · +50 pts pour une séance d’ouverture.</p><p class="mut">Les points sont figés au moment de la réussite. À la fin du mois, le podium reçoit une médaille et les compteurs repartent à zéro.</p></details>
-  ${c.past.length ? `<h3 style="margin:18px 0 10px">Championnats passés</h3><div class="grid">${c.past.map(p => `<div class="box"><b>${periodLabel(p.period)}</b>${p.podium.map(r => `<div class="row" style="padding:4px 0"><span style="flex:1">${medalIcon(r.medal)} ${e(r.pseudo)}</span><b>${r.points} pts</b></div>`).join('')}</div>`).join('')}</div>` : ''}
-  ${S.members ? `<div class="box"><h3 style="margin-bottom:8px">Séance d’ouverture (administration)</h3><p class="mut" style="margin-top:0">Cochez les participants : +50 pts chacun.</p>${S.members.map(m => `<label class="row" style="align-items:center;padding:4px 0"><input type="checkbox" data-ev="${m.id}" style="width:auto"> ${e(m.pseudo)}</label>`).join('')}<button class="btn" style="margin-top:8px" data-act="openevent">Valider la séance</button></div>` : ''}`;
+  <details class="box"><summary>Comment sont calculés les points ?</summary><p class="mut">Chaque voie vaut des <b>points de base</b> selon sa cotation (4 : 10 · 5 : 20 · 6a-6b+ : 35 · 6c-7a+ : 50 · 7b-7c+ : 70 · 8a et + : 100), multipliés par un <b>coefficient de popularité</b> : plus la voie a été réussie par de membres différents, moins elle rapporte (de ×2 pour une voie peu réussie à ×0,25 au-delà de 100 réussites). Une voie vaut toujours au moins 5 points. Les répétitions ne comptent pas, et une voie ne rapporte qu’une fois par mois.</p><p class="mut"><b>Bonus :</b> +20 % si réussie du premier coup (à vue ou flash) · +30 pts première ascension de la voie · +30 pts à l’ouvreur quand quelqu’un réussit sa voie pour la première fois · +50 pts pour une cotation supérieure à votre meilleure · +30 pts pour 5 nouvelles voies dans une séance, +75 pts pour 10.</p><p class="mut">Les points sont figés au moment de la réussite. À la fin du mois, le podium reçoit une médaille et les compteurs repartent à zéro.</p></details>
+  ${c.past.length ? `<h3 style="margin:18px 0 10px">Championnats passés</h3><div class="grid">${c.past.map(p => `<div class="box"><b>${periodLabel(p.period)}</b>${p.podium.map(r => `<div class="row" style="padding:4px 0"><span style="flex:1">${medalIcon(r.medal)} ${e(r.pseudo)}</span><b>${r.points} pts</b></div>`).join('')}</div>`).join('')}</div>` : ''}`;
 }
 
 function hallView() {
@@ -227,14 +227,9 @@ document.addEventListener('click', async ev => {
     if (a === 'delsess') { if (!confirm('Supprimer cette session ? Ses ascensions ne compteront plus dans vos statistiques (les statuts de vos voies restent).')) return; await api('DELETE', `/api/sessions/${v}`); return await load(); }
     if (a === 'ackach') { S.newAch = null; render(); await api('POST', '/api/achievements/seen'); return; }
     if (a === 'tries') { await api('PUT', `/api/voies/${id}/tries`, { tries: Math.max(0, (S.topo.tries[id] || 0) + Number(v)) }); return await load(); }
+    if (a === 'fl') { S.fl = v ? (S.fl.includes(v) ? S.fl.filter(x => x !== v) : [...S.fl, v]) : []; return render(); }
     if (a === 'clubtab') { S.clubTab = v; return render(); }
     if (a === 'ackchamp') { S.newChamp = null; render(); await api('POST', '/api/championship/seen'); return; }
-    if (a === 'openevent') {
-      const ids = [...document.querySelectorAll('input[data-ev]:checked')].map(x => Number(x.dataset.ev));
-      if (!ids.length) return alert('Cochez au moins un participant');
-      if (!confirm(`Attribuer 50 points à ${ids.length} participant(s) pour cette séance d’ouverture ?`)) return;
-      await api('POST', '/api/opening-events', { user_ids: ids }); return await load();
-    }
     if (a === 'zoom') { S.zoom = v; return render(); }
     if (a === 'unzoom') { S.zoom = null; return render(); }
     if (a === 'delphoto') { if (!confirm('Supprimer la photo de ce relais ?')) return; await api('DELETE', `/api/relais/${v}/photo`); return await load(); }
