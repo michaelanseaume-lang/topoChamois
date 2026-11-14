@@ -80,3 +80,7 @@ nav button{font-size:13px}
 
 .pts{font-size:12px;font-weight:600;color:var(--mut);white-space:nowrap}
 details.box summary{cursor:pointer;font-weight:600}
+
+.net{display:flex;align-items:center;gap:10px;padding:8px 16px;background:#2F6FD0;color:#fff;font-size:13px;font-weight:600}
+.net.off{background:#EE7B1E;color:#1A1A1A}
+.net .chip{padding:3px 10px}

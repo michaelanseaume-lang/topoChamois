@@ -23,35 +23,40 @@ module.exports = function (db, { GRADES }) {
   function valueInfo(grade, others) { const b = base(grade), c = coef(others); return { base: b, coef: c, climbers: others, pts: Math.max(FLOOR, Math.round(b * c)) }; }
 
   // ---- Journal des points (chaque attribution est figée : la valeur de la voie peut baisser après coup) ----
-  function add(uid, period, kind, ref, pts, label, voieId, sessionId) {
+  function add(uid, period, kind, ref, pts, label, voieId, sessionId, created) {
     return db.prepare(`INSERT OR IGNORE INTO points(user_id, period, kind, ref, points, label, voie_id, session_id, created_at) VALUES(?,?,?,?,?,?,?,?,?)`)
-      .run(uid, period, kind, String(ref), pts, label, voieId || null, sessionId || null, now()).changes > 0;
+      .run(uid, period, kind, String(ref), pts, label, voieId || null, sessionId || null, created || now()).changes > 0;
   }
   const has = (sql, ...a) => !!db.prepare(sql).get(...a);
 
   // Appelé à la validation d'une réussite (passage vers un statut « réussi »). Les répétitions n'appellent jamais cette fonction.
-  function scoreClimb(uid, v, status, sessionId) {
-    const period = periodOf(new Date()), ref = String(v.id);
+  function scoreClimb(uid, v, status, sessionId, at) {
+    // `at` = date réelle de la réussite (action faite hors ligne puis synchronisée). Elle compte dans le mois où elle a été faite,
+    // sauf si ce mois est déjà clôturé : dans ce cas elle compte dans le mois en cours.
+    const created = at || now();
+    let period = periodOf(new Date(created));
+    if (db.prepare('SELECT 1 FROM championships WHERE period = ?').get(period)) period = periodOf(new Date());
+    const ref = String(v.id);
     if (has("SELECT 1 FROM points WHERE user_id = ? AND period = ? AND kind = 'voie' AND ref = ?", uid, period, ref)) return; // une fois par voie et par mois
     const rel = db.prepare('SELECT num FROM relais WHERE id = ?').get(v.relais_id), tag = `${v.grade} · relais ${rel ? rel.num : '?'}`;
     const prior = db.prepare('SELECT COUNT(DISTINCT user_id) n FROM climbs WHERE voie_id = ? AND user_id != ?').get(v.id, uid).n;
     const { pts } = valueInfo(v.grade, prior);
-    add(uid, period, 'voie', ref, pts, `Voie ${tag}`, v.id, sessionId);
-    if (status === 'avue' || status === 'flash') add(uid, period, 'flash', ref, Math.max(1, Math.round(pts * 0.2)), `Premier essai +20 % · ${tag}`, v.id, sessionId);
+    add(uid, period, 'voie', ref, pts, `Voie ${tag}`, v.id, sessionId, created);
+    if (status === 'avue' || status === 'flash') add(uid, period, 'flash', ref, Math.max(1, Math.round(pts * 0.2)), `Premier essai +20 % · ${tag}`, v.id, sessionId, created);
 
     const op = db.prepare('SELECT user_id FROM openings WHERE voie_id = ?').get(v.id), opener = op ? op.user_id : null;
     if (uid !== opener) { // l'ouvreur ne gagne pas de bonus sur sa propre voie
       const others = db.prepare('SELECT COUNT(DISTINCT user_id) n FROM climbs WHERE voie_id = ? AND user_id != ? AND user_id != ?').get(v.id, uid, opener || 0).n;
-      if (others === 0 && !has("SELECT 1 FROM points WHERE kind = 'first' AND ref = ?", ref)) add(uid, period, 'first', ref, 30, `Première ascension · ${tag}`, v.id, sessionId);
+      if (others === 0 && !has("SELECT 1 FROM points WHERE kind = 'first' AND ref = ?", ref)) add(uid, period, 'first', ref, 30, `Première ascension · ${tag}`, v.id, sessionId, created);
       // ouvrir une voie rapporte 30 pts quand un autre membre la réussit pour la première fois (évite de gagner des points en créant des voies à vide)
-      if (opener && !has("SELECT 1 FROM points WHERE kind = 'opened' AND ref = ?", ref)) add(opener, period, 'opened', ref, 30, `Voie ouverte, 1re réussite · ${tag}`, v.id, null);
+      if (opener && !has("SELECT 1 FROM points WHERE kind = 'opened' AND ref = ?", ref)) add(opener, period, 'opened', ref, 30, `Voie ouverte, 1re réussite · ${tag}`, v.id, null, created);
     }
     const prev = db.prepare('SELECT grade FROM climbs WHERE user_id = ? AND (voie_id IS NULL OR voie_id != ?)').all(uid, v.id).reduce((m, r) => Math.max(m, gi(r.grade)), -1);
-    if (prev >= 0 && gi(v.grade) > prev) add(uid, period, 'best', v.grade, 50, `Au-dessus de votre meilleure cotation · ${v.grade}`, v.id, sessionId);
+    if (prev >= 0 && gi(v.grade) > prev) add(uid, period, 'best', v.grade, 50, `Au-dessus de votre meilleure cotation · ${v.grade}`, v.id, sessionId, created);
     if (sessionId) {
       const n = db.prepare("SELECT COUNT(*) n FROM points WHERE user_id = ? AND session_id = ? AND kind = 'voie'").get(uid, sessionId).n;
-      if (n === 5) add(uid, period, 's5', sessionId, 30, '5 nouvelles voies dans la séance', null, sessionId);
-      if (n === 10) add(uid, period, 's10', sessionId, 75, '10 nouvelles voies dans la séance', null, sessionId);
+      if (n === 5) add(uid, period, 's5', sessionId, 30, '5 nouvelles voies dans la séance', null, sessionId, created);
+      if (n === 10) add(uid, period, 's10', sessionId, 75, '10 nouvelles voies dans la séance', null, sessionId, created);
     }
   }
   const scoredSet = uid => new Set(db.prepare("SELECT ref FROM points WHERE user_id = ? AND period = ? AND kind = 'voie'").all(uid, periodOf(new Date())).map(r => Number(r.ref)));

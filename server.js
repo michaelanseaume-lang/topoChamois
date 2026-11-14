@@ -80,6 +80,9 @@ CREATE TABLE IF NOT EXISTS championships(period TEXT PRIMARY KEY, closed_at TEXT
 CREATE TABLE IF NOT EXISTS results(
   period TEXT NOT NULL REFERENCES championships(period), user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   rank INTEGER NOT NULL, points INTEGER NOT NULL, medal TEXT, seen INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(period, user_id));
+-- Actions envoyées par les téléphones (file hors ligne) : l'identifiant unique évite de comptabiliser deux fois une même action
+CREATE TABLE IF NOT EXISTS sync_actions(id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  type TEXT NOT NULL, result TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS user_achievements(
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, key TEXT NOT NULL,
   unlocked_at TEXT NOT NULL, seen INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id, key));
@@ -122,6 +125,12 @@ const DONE_SQL = DONE.map(s => `'${s}'`).join(',');
 const gi = g => GRADES.indexOf(g);
 const now = () => new Date().toISOString();
 const isDone = s => DONE.includes(s);
+db.prepare('DELETE FROM sync_actions WHERE created_at < ?').run(new Date(Date.now() - 90 * 86400000).toISOString());
+class Fail extends Error { constructor(msg, status = 400) { super(msg); this.status = status; } } // refus « propre » d'une action
+const need = (cond, msg, status) => { if (!cond) throw new Fail(msg, status); };
+const wrap = fn => (req, res) => { try { fn(req, res); } catch (e) { if (e instanceof Fail) return res.status(e.status).json({ error: e.message }); throw e; } };
+// Date réelle d'une action faite hors ligne : acceptée si plausible (ni dans le futur, ni plus vieille de 60 jours)
+const stamp = at => { const t = Date.parse(at), n = Date.now(); return new Date(t && t <= n + 60000 && t >= n - 60 * 86400000 ? t : n).toISOString(); };
 const ach = require('./achievements')(db, { GRADES, DONE_SQL });
 const champ = require('./championship')(db, { GRADES });
 champ.closeMonths();
@@ -133,12 +142,12 @@ function syncOpening(voieId, setter) {
   if (u) db.prepare(`INSERT INTO openings(user_id, voie_id, created_at) VALUES(?,?,?)
     ON CONFLICT(voie_id) DO UPDATE SET user_id = excluded.user_id`).run(u.id, voieId, now());
 }
-function addClimb(uid, v, status) {
-  db.prepare('INSERT INTO climbs(user_id, voie_id, grade, color, status, created_at) VALUES(?,?,?,?,?,?)').run(uid, v.id, v.grade, v.color, status, now());
+function addClimb(uid, v, status, at) {
+  db.prepare('INSERT INTO climbs(user_id, voie_id, grade, color, status, created_at) VALUES(?,?,?,?,?,?)').run(uid, v.id, v.grade, v.color, status, at || now());
 }
 const lastClimb = (uid, vid) => db.prepare('SELECT id FROM climbs WHERE user_id = ? AND voie_id = ? ORDER BY id DESC LIMIT 1').get(uid, vid);
-function syncClimb(uid, v, prev, st) { // une voie réussie = une entrée au journal ; annuler le statut l'annule
-  if (isDone(st) && !isDone(prev)) addClimb(uid, v, st);
+function syncClimb(uid, v, prev, st, at) { // une voie réussie = une entrée au journal ; annuler le statut l'annule
+  if (isDone(st) && !isDone(prev)) addClimb(uid, v, st, at);
   else if (isDone(st) && prev !== st) { const l = lastClimb(uid, v.id); if (l) db.prepare('UPDATE climbs SET status = ? WHERE id = ?').run(st, l.id); }
   else if (!isDone(st) && isDone(prev)) { const l = lastClimb(uid, v.id); if (l) db.prepare('DELETE FROM climbs WHERE id = ?').run(l.id); }
 }
@@ -341,85 +350,126 @@ app.delete('/api/voies/:id', auth, opener, (req, res) => { // supprime ses vidé
 });
 
 // ---------- Interactions grimpeur ----------
-function addAscent(sessionId, uid, v, status) {
+function addAscent(sessionId, uid, v, status, at) {
   db.prepare('INSERT INTO ascents(user_id, session_id, voie_id, grade, color, status, created_at) VALUES(?,?,?,?,?,?,?)')
-    .run(uid, sessionId, v.id, v.grade, v.color, status, now());
+    .run(uid, sessionId, v.id, v.grade, v.color, status, at || now());
 }
-app.put('/api/voies/:id/status', auth, (req, res) => {
-  const v = voieById(req.params.id), uid = req.user.id, st = req.body.status;
-  if (!v) return res.status(404).json({ error: 'Voie introuvable' });
+// Actions du grimpeur : fonctions communes à l'API directe et à la synchronisation hors ligne (/api/sync).
+// `at` = date réelle de l'action (utile quand elle a été faite sans réseau).
+function getVoie(id) { const v = voieById(id); need(v, 'Voie introuvable', 404); return v; }
+const doStatus = db.transaction((uid, voieId, st, at) => {
+  const v = getVoie(voieId);
   const prev = (db.prepare('SELECT status FROM statuses WHERE user_id = ? AND voie_id = ?').get(uid, v.id) || {}).status;
   if (!st) {
     db.prepare('DELETE FROM statuses WHERE user_id = ? AND voie_id = ?').run(uid, v.id);
-    syncClimb(uid, v, prev, null);
-    return res.json({ ok: true });
+    return syncClimb(uid, v, prev, null, at);
   }
-  if (!STATUSES.includes(st)) return res.status(400).json({ error: 'Statut invalide' });
+  need(STATUSES.includes(st), 'Statut invalide');
   db.prepare(`INSERT INTO statuses(user_id, voie_id, status, updated_at, worked_at) VALUES(?,?,?,?,?)
     ON CONFLICT(user_id, voie_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at,
-      worked_at = COALESCE(statuses.worked_at, excluded.worked_at)`).run(uid, v.id, st, now(), st === 'travail' ? now() : null);
-  syncClimb(uid, v, prev, st);
+      worked_at = COALESCE(statuses.worked_at, excluded.worked_at)`).run(uid, v.id, st, at, st === 'travail' ? at : null);
+  syncClimb(uid, v, prev, st, at);
   const s = activeSession(uid);
-  if (isDone(st) && !isDone(prev)) champ.scoreClimb(uid, v, st, s && s.id); // points enregistrés à la validation de la réussite
+  if (isDone(st) && !isDone(prev)) champ.scoreClimb(uid, v, st, s && s.id, at); // points enregistrés à la validation de la réussite
   if (s && st !== 'non') {
     const last = db.prepare('SELECT id FROM ascents WHERE session_id = ? AND voie_id = ? ORDER BY id DESC LIMIT 1').get(s.id, v.id);
-    if (last) db.prepare('UPDATE ascents SET status = ? WHERE id = ?').run(st, last.id); else addAscent(s.id, uid, v, st);
+    if (last) db.prepare('UPDATE ascents SET status = ? WHERE id = ?').run(st, last.id); else addAscent(s.id, uid, v, st, at);
   }
-  res.json({ ok: true });
 });
-app.put('/api/voies/:id/tries', auth, (req, res) => { // compteur d'essais (utile pour « après travail »)
-  const n = Math.max(0, Math.min(99, parseInt(req.body.tries, 10) || 0));
-  const r = db.prepare('UPDATE statuses SET tries = ? WHERE user_id = ? AND voie_id = ?').run(n, req.user.id, req.params.id);
-  if (!r.changes) return res.status(400).json({ error: 'Choisissez d’abord un statut' });
-  res.json({ ok: true });
+const doTries = db.transaction((uid, voieId, tries) => { // compteur d'essais (utile pour « après travail »)
+  const n = Math.max(0, Math.min(99, parseInt(tries, 10) || 0));
+  need(db.prepare('UPDATE statuses SET tries = ? WHERE user_id = ? AND voie_id = ?').run(n, uid, voieId).changes, 'Choisissez d’abord un statut');
 });
-app.post('/api/voies/:id/repeat', auth, (req, res) => { // « refaite pendant la session »
-  const v = voieById(req.params.id), uid = req.user.id, s = activeSession(uid);
-  const st = db.prepare('SELECT status FROM statuses WHERE user_id = ? AND voie_id = ?').get(uid, req.params.id);
-  if (!v || !s || !st || st.status === 'non') return res.status(400).json({ error: 'Session et statut requis' });
-  addAscent(s.id, uid, v, st.status);
-  if (isDone(st.status)) addClimb(uid, v, st.status);
-  res.json({ ok: true });
+const doRepeat = db.transaction((uid, voieId, at) => { // « refaite pendant la session »
+  const v = getVoie(voieId), s = activeSession(uid);
+  const st = db.prepare('SELECT status FROM statuses WHERE user_id = ? AND voie_id = ?').get(uid, v.id);
+  need(s && st && st.status !== 'non', 'Session et statut requis');
+  addAscent(s.id, uid, v, st.status, at);
+  if (isDone(st.status)) addClimb(uid, v, st.status, at);
 });
-app.post('/api/voies/:id/validate', auth, (req, res) => { // une seule voix par personne : validation OU contestation
-  const v = voieById(req.params.id), uid = req.user.id;
-  if (!v) return res.status(404).json({ error: 'Voie introuvable' });
-  db.transaction(() => {
-    if (db.prepare('SELECT 1 FROM validations WHERE user_id = ? AND voie_id = ?').get(uid, v.id))
-      db.prepare('DELETE FROM validations WHERE user_id = ? AND voie_id = ?').run(uid, v.id);
-    else {
-      db.prepare('INSERT INTO validations(user_id, voie_id) VALUES(?,?)').run(uid, v.id);
-      db.prepare('DELETE FROM contests WHERE user_id = ? AND voie_id = ?').run(uid, v.id);
-    }
-  })();
-  res.json({ ok: true });
-});
-app.post('/api/voies/:id/contest', auth, (req, res) => {
-  const v = voieById(req.params.id), uid = req.user.id, g = req.body.grade;
-  if (!v) return res.status(404).json({ error: 'Voie introuvable' });
-  if (!GRADES.includes(g) || g === v.grade) return res.status(400).json({ error: 'Cotation proposée invalide' });
-  db.transaction(() => {
-    const cur = db.prepare('SELECT grade FROM contests WHERE user_id = ? AND voie_id = ?').get(uid, v.id);
+const doValidate = db.transaction((uid, voieId) => { // une seule voix par personne : validation OU contestation
+  const v = getVoie(voieId);
+  if (db.prepare('SELECT 1 FROM validations WHERE user_id = ? AND voie_id = ?').get(uid, v.id))
+    db.prepare('DELETE FROM validations WHERE user_id = ? AND voie_id = ?').run(uid, v.id);
+  else {
+    db.prepare('INSERT INTO validations(user_id, voie_id) VALUES(?,?)').run(uid, v.id);
     db.prepare('DELETE FROM contests WHERE user_id = ? AND voie_id = ?').run(uid, v.id);
-    if (!cur || cur.grade !== g) { // re-cliquer sur sa propre proposition retire sa voix
-      db.prepare('INSERT INTO contests(user_id, voie_id, grade) VALUES(?,?,?)').run(uid, v.id, g);
-      db.prepare('DELETE FROM validations WHERE user_id = ? AND voie_id = ?').run(uid, v.id);
+  }
+});
+const doContest = db.transaction((uid, voieId, g) => {
+  const v = getVoie(voieId);
+  need(GRADES.includes(g) && g !== v.grade, 'Cotation proposée invalide');
+  const cur = db.prepare('SELECT grade FROM contests WHERE user_id = ? AND voie_id = ?').get(uid, v.id);
+  db.prepare('DELETE FROM contests WHERE user_id = ? AND voie_id = ?').run(uid, v.id);
+  if (!cur || cur.grade !== g) { // re-cliquer sur sa propre proposition retire sa voix
+    db.prepare('INSERT INTO contests(user_id, voie_id, grade) VALUES(?,?,?)').run(uid, v.id, g);
+    db.prepare('DELETE FROM validations WHERE user_id = ? AND voie_id = ?').run(uid, v.id);
+  }
+});
+const doComment = db.transaction((uid, voieId, text, at) => {
+  const t = String(text || '').trim().slice(0, 500);
+  need(t, 'Commentaire vide');
+  const v = getVoie(voieId);
+  db.prepare('INSERT INTO comments(voie_id, user_id, text, created_at) VALUES(?,?,?,?)').run(v.id, uid, t, at);
+});
+const doSessionStart = db.transaction((uid, at) => { if (!activeSession(uid)) db.prepare('INSERT INTO sessions(user_id, started_at) VALUES(?,?)').run(uid, at); });
+const doSessionEnd = db.transaction((uid, at) => {
+  const s = activeSession(uid);
+  if (!s) return;
+  if (db.prepare('SELECT COUNT(*) n FROM ascents WHERE session_id = ?').get(s.id).n === 0) db.prepare('DELETE FROM sessions WHERE id = ?').run(s.id);
+  else db.prepare('UPDATE sessions SET ended_at = ? WHERE id = ?').run(at, s.id);
+});
+const ok = (res) => res.json({ ok: true });
+app.put('/api/voies/:id/status', auth, wrap((req, res) => { doStatus(req.user.id, req.params.id, req.body.status || null, now()); ok(res); }));
+app.put('/api/voies/:id/tries', auth, wrap((req, res) => { doTries(req.user.id, req.params.id, req.body.tries); ok(res); }));
+app.post('/api/voies/:id/repeat', auth, wrap((req, res) => { doRepeat(req.user.id, req.params.id, now()); ok(res); }));
+app.post('/api/voies/:id/validate', auth, wrap((req, res) => { doValidate(req.user.id, req.params.id); ok(res); }));
+app.post('/api/voies/:id/contest', auth, wrap((req, res) => { doContest(req.user.id, req.params.id, req.body.grade); ok(res); }));
+app.post('/api/voies/:id/comments', auth, wrap((req, res) => { doComment(req.user.id, req.params.id, req.body.text, now()); ok(res); }));
+app.post('/api/sessions/start', auth, (req, res) => { doSessionStart(req.user.id, now()); ok(res); });
+app.post('/api/sessions/end', auth, (req, res) => { doSessionEnd(req.user.id, now()); ok(res); });
+
+// ---------- Synchronisation des actions faites hors ligne ----------
+function applyAction(uid, a) {
+  const at = stamp(a.at), id = a.voieId;
+  switch (a.type) {
+    case 'status': need(a.status === null || a.status === undefined || typeof a.status === 'string', 'Statut invalide'); return doStatus(uid, id, a.status || null, at);
+    case 'tries': return doTries(uid, id, a.tries);
+    case 'repeat': return doRepeat(uid, id, at);
+    case 'validate': return doValidate(uid, id);
+    case 'contest': return doContest(uid, id, a.grade);
+    case 'comment': return doComment(uid, id, a.text, at);
+    case 'session_start': return doSessionStart(uid, at);
+    case 'session_end': return doSessionEnd(uid, at);
+    default: throw new Fail('Type d’action inconnu');
+  }
+}
+app.post('/api/sync', auth, (req, res) => {
+  const uid = req.user.id, list = (Array.isArray(req.body.actions) ? req.body.actions : []).slice(0, 100);
+  const seen = db.prepare('SELECT user_id FROM sync_actions WHERE id = ?'), mark = db.prepare('INSERT OR IGNORE INTO sync_actions(id, user_id, type, result, created_at) VALUES(?,?,?,?,?)');
+  const results = list.map(a => {
+    if (!a || typeof a !== 'object') return { id: '', status: 'rejected', error: 'Action invalide' };
+    const id = String(a.id || '');
+    if (!/^[0-9a-f-]{36}$/i.test(id)) return { id, status: 'rejected', error: 'Identifiant invalide' };
+    if (Number(a.uid) !== uid) return { id, status: 'wrong_user' }; // action d'un autre compte sur ce téléphone : on la garde sans l'appliquer
+    const old = seen.get(id);
+    if (old) return old.user_id === uid ? { id, status: 'duplicate' } : { id, status: 'rejected', error: 'Identifiant déjà utilisé' }; // déjà reçue : jamais comptée deux fois
+    try {
+      db.transaction(() => { applyAction(uid, a); mark.run(id, uid, String(a.type), 'applied', now()); })();
+      return { id, status: 'applied' };
+    } catch (e) {
+      if (!(e instanceof Fail)) { console.error(e); return { id, status: 'error', error: 'Erreur serveur' }; } // le téléphone réessaiera
+      mark.run(id, uid, String(a.type), 'rejected', now());
+      return { id, status: 'rejected', error: e.message }; // ex. voie supprimée entre-temps
     }
-  })();
-  res.json({ ok: true });
+  });
+  res.json({ results });
 });
 app.get('/api/voies/:id/comments', auth, (req, res) => {
   if (!voieById(req.params.id)) return res.status(404).json({ error: 'Voie introuvable' });
   res.json({ comments: db.prepare(`SELECT c.id, c.user_id, u.pseudo, c.text, c.created_at FROM comments c JOIN users u ON u.id = c.user_id
     WHERE c.voie_id = ? ORDER BY c.id`).all(req.params.id)
     .map(c => ({ id: c.id, pseudo: c.pseudo, text: c.text, created_at: c.created_at, mine: c.user_id === req.user.id })) });
-});
-app.post('/api/voies/:id/comments', auth, (req, res) => {
-  const t = String(req.body.text || '').trim().slice(0, 500);
-  if (!t) return res.status(400).json({ error: 'Commentaire vide' });
-  if (!voieById(req.params.id)) return res.status(404).json({ error: 'Voie introuvable' });
-  db.prepare('INSERT INTO comments(voie_id, user_id, text, created_at) VALUES(?,?,?,?)').run(req.params.id, req.user.id, t, now());
-  res.json({ ok: true });
 });
 
 app.delete('/api/comments/:id', auth, (req, res) => { // l'auteur supprime le sien ; l'admin modère tous les commentaires
@@ -492,18 +542,6 @@ app.get('/api/achievements', auth, (req, res) => {
 app.post('/api/achievements/seen', auth, (req, res) => { ach.markSeen(req.user.id); res.json({ ok: true }); });
 
 // ---------- Sessions & stats ----------
-app.post('/api/sessions/start', auth, (req, res) => {
-  if (!activeSession(req.user.id)) db.prepare('INSERT INTO sessions(user_id, started_at) VALUES(?,?)').run(req.user.id, now());
-  res.json({ ok: true });
-});
-app.post('/api/sessions/end', auth, (req, res) => {
-  const s = activeSession(req.user.id);
-  if (s) {
-    if (db.prepare('SELECT COUNT(*) n FROM ascents WHERE session_id = ?').get(s.id).n === 0) db.prepare('DELETE FROM sessions WHERE id = ?').run(s.id);
-    else db.prepare('UPDATE sessions SET ended_at = ? WHERE id = ?').run(now(), s.id);
-  }
-  res.json({ ok: true });
-});
 
 // Cotations « réalisées » (statuts actuels + historique des ascensions), par utilisateur
 function doneGrades() {
