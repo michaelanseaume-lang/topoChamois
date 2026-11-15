@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="1200"
+   height="900"
+   viewBox="0 0 317.5 238.125"
+   version="1.1"
+   id="svg1"
+   inkscape:version="1.4.4 (dcaf3e7, 2026-05-05)"
+   sodipodi:docname="carteMur.svg"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview1"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="true"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:document-units="mm"
+     inkscape:zoom="2.0535659"
+     inkscape:cx="998.0201"
+     inkscape:cy="186.74833"
+     inkscape:window-width="1920"
+     inkscape:window-height="1017"
+     inkscape:window-x="-8"
+     inkscape:window-y="-8"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="layer1" />
+  <defs
+     id="defs1" />
+  <g
+     inkscape:label="Calque 1"
+     inkscape:groupmode="layer"
+     id="layer1">
+    <path
+       style="fill:#999999;stroke-width:0.264583"
+       d="m 10.568098,12.025767 h 31.339877 l 9.474846,8.746012 43.001226,6.923926 43.365643,19.314109 25.5092,22.22945 h 145.03805 v 13.483434 h 4.73742 V 3.6441718 H 4.0085888 V 83.451532 H 8.3815951 V 12.048543 Z"
+       id="path3" />
+    <path
+       style="fill:#cccccc;stroke-width:0.264583"
+       d="M 4.1229097,83.23124 H 8.2458194 L 8.3746604,44.450121 H 3.7363868 Z"
+       id="secteur1" />
+    <path
+       style="fill:#cccccc;stroke-width:0.264583"
+       d="M 8.3746604,44.450121 V 11.853365 H 3.7363868 v 32.596756 z"
+       id="secteur2" />
+    <path
+       style="fill:#cccccc;stroke-width:0.264583"
+       d="M 3.8652278,3.4787051 V 11.853365 H 35.560095 V 3.4787051 Z"
+       id="secteur3" />
+    <path
+       style="fill:#cccccc;stroke-width:0.264583"
+       d="M 35.560095,3.4787051 H 59.524508 V 22.16064 l -8.141687,-1.343309 -9.474846,-8.746012 h -6.331749 z"
+       id="secteur4" />
+    <path
+       style="fill:#cccccc;stroke-width:0.264583"
+       d="M 59.524508,3.6719663 H 112.60697 V 35.688936 L 94.504821,27.63638 59.524508,22.096219 Z"
+       id="secteur5" />
+    <path
+       style="fill:#cccccc;stroke-width:0.264583"
+       d="M 146.86012,54.844785 V 3.5530673 H 112.60491 V 35.895092 l 24.96257,11.023618 z"
+       id="secteur6" />
+    <path
+       style="fill:#cccccc;stroke-width:0.264583"
+       d="m 146.86012,3.6441718 h 27.42239 V 69.239264 H 163.35 L 146.76902,54.935889 Z"
+       id="secteur7" />
+    <path
+       style="fill:#cccccc;stroke-width:0.264583"
+       d="m 174.10031,3.5530673 56.26727,0.054479 V 69.445261 h -56.17465 z"
+       id="secteur8" />
+    <path
+       style="fill:#cccccc;stroke-width:0.264583"
+       d="m 230.1099,3.4787051 h 59.13799 V 68.929897 h -59.00915 z"
+       id="secteur9" />
+    <path
+       style="fill:#cccccc;stroke-width:0.264583"
+       d="m 289.24789,3.6075461 h 23.83558 V 82.587035 h -4.89596 V 69.316419 h -18.68194 z"
+       id="secteur10" />
+  </g>
+</svg>

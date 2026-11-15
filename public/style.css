@@ -95,3 +95,15 @@ details.box summary{cursor:pointer;font-weight:600}
 .chart .bar{fill:var(--ac)}
 .chart text{fill:var(--mut);font-size:8px;text-anchor:middle}
 .chart .cnt{fill:var(--ink);font-size:10px;font-weight:700}
+
+.mapbox{padding:10px 12px}
+.wallmap{width:100%;height:auto;max-height:240px;display:block}
+.wm-base path{fill:var(--wb)}
+.wm-sec{fill:transparent;stroke:transparent;stroke-width:3;cursor:pointer;outline:none}
+.wm-sec:hover{fill:color-mix(in srgb,var(--ac) 35%,transparent)}
+.wm-sec:focus-visible{stroke:var(--ac);stroke-width:1.2}
+.wm-sec.on{fill:var(--ac)}
+.wm-lbl{font:700 7px 'Bricolage Grotesque',system-ui,sans-serif;fill:var(--ink);opacity:.7;text-anchor:middle;dominant-baseline:central;pointer-events:none}
+.wm-lbl.on{fill:#fff;opacity:1}
+:root{--wb:#98A2AE}
+:root[data-theme="dark"]{--wb:#3A4757}

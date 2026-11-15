@@ -7,7 +7,7 @@ const SST = [...ST, ['chute', 'Sortie avec chute']]; // statuts d'une session (l
 const RANK = { avue: 4, flash: 3, apres: 2, travail: 1, chute: 1 }; // à vue > flash > après travail > travail en cours
 const DONE = ['avue', 'flash', 'apres'];
 const ROLES = [['user', 'Grimpeur'], ['opener', 'Ouvreur'], ['admin', 'Admin']];
-const S = { monthOpen: {}, offline: false, pending: 0, pendV: new Set(), missing: false, user: null, tab: 'topo', open: null, draft: null, admin: false, auth: 'in', err: '', topo: null, profile: null, club: null, members: null, comments: [], videos: [], zoom: null, ach: null, newAch: null, clubTab: 'champ', fl: [], champ: null, hall: null, newChamp: null };
+const S = { sector: 'all', map: null, monthOpen: {}, offline: false, pending: 0, pendV: new Set(), missing: false, user: null, tab: 'topo', open: null, draft: null, admin: false, auth: 'in', err: '', topo: null, profile: null, club: null, members: null, comments: [], videos: [], zoom: null, ach: null, newAch: null, clubTab: 'champ', fl: [], champ: null, hall: null, newChamp: null };
 
 const e = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const ci = g => GR.indexOf(g);
@@ -233,11 +233,53 @@ function sessionBar() {
     : `<div class="sessbar"><span class="mut">Aucune session en cours : les statuts affichent votre meilleur résultat.</span><button class="chip" data-act="startsess">▶ Démarrer une session</button></div>`;
 }
 
+// ---- Carte du mur (vue du dessus) : chaque secteur regroupe 3 relais (secteur 1 = relais 1 à 3, secteur 2 = relais 4 à 6…) ----
+const sectorOf = num => Math.ceil(num / 3);
+async function loadMap() { // lit public/carteMur.svg : seuls les tracés (attribut d) sont repris, le reste du fichier est ignoré
+  try {
+    const doc = new DOMParser().parseFromString(await (await fetch('/carteMur.svg')).text(), 'image/svg+xml');
+    const sectors = [...doc.querySelectorAll('path[id^="secteur"]')].map(p => ({ n: Number(p.id.replace('secteur', '')), d: p.getAttribute('d') })).filter(x => x.n >= 1 && x.d).sort((a, b) => a.n - b.n);
+    const base = [...doc.querySelectorAll('path')].filter(p => !/^secteur\d+$/.test(p.id)).map(p => p.getAttribute('d')).filter(Boolean);
+    if (!sectors.length) return;
+    let vb = doc.documentElement.getAttribute('viewBox') || '0 0 317.5 238.125';
+    try { // recadre sur le mur et repère le centre de chaque secteur pour son numéro
+      const NS = 'http://www.w3.org/2000/svg', svg = document.createElementNS(NS, 'svg');
+      svg.setAttribute('style', 'position:absolute;width:0;height:0;visibility:hidden'); document.body.appendChild(svg);
+      const box = d => { const p = document.createElementNS(NS, 'path'); p.setAttribute('d', d); svg.appendChild(p); return p.getBBox(); };
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const d of [...base, ...sectors.map(x => x.d)]) { const b = box(d); x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x + b.width); y1 = Math.max(y1, b.y + b.height); }
+      for (const sc of sectors) { const b = box(sc.d); if (b.width >= 10 && b.height >= 8) { sc.lx = +(b.x + b.width / 2).toFixed(1); sc.ly = +(b.y + b.height / 2).toFixed(1); } }
+      svg.remove();
+      if (isFinite(x0) && x1 > x0 && y1 > y0) vb = `${(x0 - 2).toFixed(1)} ${(y0 - 2).toFixed(1)} ${(x1 - x0 + 4).toFixed(1)} ${(y1 - y0 + 4).toFixed(1)}`;
+    } catch { /* navigateur sans getBBox : on garde le cadrage du fichier, sans numéros */ }
+    S.map = { vb, base, sectors };
+    if (S.user) render();
+  } catch { /* carte indisponible : les boutons de secteur suffisent */ }
+}
+function wallMap() {
+  const m = S.map, sel = S.sector;
+  if (!m) return '';
+  const on = n => sel === 'all' || sel === n;
+  return `<svg class="wallmap" viewBox="${m.vb}" role="group" aria-label="Carte du mur vue du dessus : choisissez un secteur"><g class="wm-base">${m.base.map(d => `<path d="${e(d)}"/>`).join('')}</g>${m.sectors.map(sc => `<path class="wm-sec ${on(sc.n) ? 'on' : ''}" d="${e(sc.d)}" data-act="sector" data-v="${sc.n}" tabindex="0" role="button" aria-pressed="${on(sc.n)}" aria-label="Secteur ${sc.n}, relais ${sc.n * 3 - 2} à ${sc.n * 3}"><title>Secteur ${sc.n} · relais ${sc.n * 3 - 2} à ${sc.n * 3}</title></path>`).join('')}${m.sectors.filter(sc => sc.lx !== undefined).map(sc => `<text class="wm-lbl ${on(sc.n) ? 'on' : ''}" x="${sc.lx}" y="${sc.ly}">${sc.n}</text>`).join('')}</svg>`;
+}
+function mapBox() {
+  const sel = S.sector, on = n => sel === 'all' || sel === n;
+  const chips = Array.from({ length: 10 }, (_, i) => i + 1).map(n => `<button class="chip ${on(n) ? 'on' : ''}" data-act="sector" data-v="${n}" aria-pressed="${on(n)}" title="Relais ${n * 3 - 2} à ${n * 3}">${n}</button>`).join('');
+  return `<div class="box mapbox">${wallMap()}<div class="bar" role="group" aria-label="Choisir un secteur" style="margin:8px 0 0"><span class="mut">Secteur</span>${chips}<button class="chip ${sel === 'all' ? 'on' : ''}" data-act="sector" data-v="all" aria-pressed="${sel === 'all'}">Tout afficher</button></div></div>`;
+}
+function sectorTitle() {
+  const sel = S.sector;
+  if (sel === null) return '<p class="mut">👆 Touchez un secteur sur la carte (ou son numéro) pour afficher ses relais.</p>';
+  return `<div class="row" style="align-items:center;margin:4px 0 10px"><h3 style="flex:1">${sel === 'all' ? 'Tous les relais' : `Secteur ${sel} · relais ${sel * 3 - 2} à ${sel * 3}`}</h3><button class="chip" data-act="sector" data-v="${sel}">Masquer</button></div>`;
+}
+
 function topo() {
-  const lv = S.fl;
-  const rs = S.topo.relais.map(r => ({ ...r, voies: lv.length ? r.voies.filter(v => lv.includes(v.grade[0])) : r.voies })).filter(r => !lv.length || r.voies.length);
-  return `${sessionBar()}<div class="bar" role="group" aria-label="Filtrer par niveau"><button class="chip ${lv.length ? '' : 'on'}" data-act="fl" data-v="">Tous</button>${['4', '5', '6', '7', '8'].map(n => `<button class="chip ${lv.includes(n) ? 'on' : ''}" data-act="fl" data-v="${n}" aria-pressed="${lv.includes(n)}">${n}</button>`).join('')}${canEdit() ? `<button class="btn" style="margin-left:auto" data-act="addrel">+ Relais</button>` : ''}</div>
-  <div class="grid">${rs.map(r => `<section class="rel"><header><h3>Relais ${r.num}</h3>${canEdit() ? `<button class="btn del" style="padding:4px 10px;font-size:12px" data-act="delrel" data-v="${r.id}">Supprimer</button>` : ''}</header>${photoBlock(r)}${r.voies.map(voieRow).join('') || '<p class="mut" style="padding:0 14px">Aucune voie.</p>'}${canEdit() ? `<button class="add" data-act="addvoie" data-v="${r.id}">+ Ajouter une voie</button>` : ''}</section>`).join('')}</div>${rs.length ? '' : `<p class="mut">${S.topo.relais.length ? 'Aucune voie dans ces niveaux.' : 'Le mur est vide.' + (isOpener() ? ' Activez le mode ouvreur pour ajouter un relais.' : '')}</p>`}`;
+  const lv = S.fl, sel = S.sector;
+  const inSector = r => sel === 'all' || (typeof sel === 'number' && sectorOf(r.num) === sel); // par défaut (aucun secteur choisi), aucun relais n'est affiché
+  const rs = S.topo.relais.filter(inSector).map(r => ({ ...r, voies: lv.length ? r.voies.filter(v => lv.includes(v.grade[0])) : r.voies })).filter(r => !lv.length || r.voies.length);
+  const emptyMsg = !S.topo.relais.length ? 'Le mur est vide.' + (isOpener() ? ' Activez le mode ouvreur pour ajouter un relais.' : '') : !S.topo.relais.some(inSector) ? 'Aucun relais dans ce secteur pour le moment.' : 'Aucune voie dans ces niveaux.';
+  return `${sessionBar()}${mapBox()}<div class="bar" role="group" aria-label="Filtrer par niveau"><button class="chip ${lv.length ? '' : 'on'}" data-act="fl" data-v="">Tous</button>${['4', '5', '6', '7', '8'].map(n => `<button class="chip ${lv.includes(n) ? 'on' : ''}" data-act="fl" data-v="${n}" aria-pressed="${lv.includes(n)}">${n}</button>`).join('')}${canEdit() ? `<button class="btn" style="margin-left:auto" data-act="addrel">+ Relais</button>` : ''}</div>
+  ${sectorTitle()}<div class="grid">${rs.map(r => `<section class="rel"><header><h3>Relais ${r.num}</h3>${canEdit() ? `<button class="btn del" style="padding:4px 10px;font-size:12px" data-act="delrel" data-v="${r.id}">Supprimer</button>` : ''}</header>${photoBlock(r)}${r.voies.map(voieRow).join('') || '<p class="mut" style="padding:0 14px">Aucune voie.</p>'}${canEdit() ? `<button class="add" data-act="addvoie" data-v="${r.id}">+ Ajouter une voie</button>` : ''}</section>`).join('')}</div>${rs.length || sel === null ? '' : `<p class="mut">${emptyMsg}</p>`}`;
 }
 
 function sheet() {
@@ -427,6 +469,7 @@ document.addEventListener('click', async ev => {
     if (a === 'retry') { toast('Nouvelle tentative…'); await recover(); toast(''); return; }
     if (a === 'dlwall') return await downloadWall();
     if (a === 'install') { if (installEvt) { installEvt.prompt(); installEvt = null; } return render(); }
+    if (a === 'sector') { S.sector = v === 'all' ? (S.sector === 'all' ? null : 'all') : (S.sector === Number(v) ? null : Number(v)); return render(); } // re-cliquer sur le secteur choisi le masque de nouveau
     if (a === 'fl') { S.fl = v ? (S.fl.includes(v) ? S.fl.filter(x => x !== v) : [...S.fl, v]) : []; return render(); }
     if (a === 'clubtab') { S.clubTab = v; return render(); }
     if (a === 'ackchamp') { S.newChamp = null; render(); await api('POST', '/api/championship/seen'); return; }
@@ -470,7 +513,7 @@ document.addEventListener('click', async ev => {
     if (a === 'vote') return await act({ type: 'contest', voieId: id, grade: v });
     if (a === 'contest') return await act({ type: 'contest', voieId: id, grade: val('pcot') });
     if (a === 'comment') { const x = val('cm').trim(); if (!x) return; return await act({ type: 'comment', voieId: id, text: x }); }
-    if (a === 'addrel') { const r = await api('POST', '/api/relais'); S.topo.relais.push({ id: r.id, num: r.num, voies: [] }); render(); return await load(); }
+    if (a === 'addrel') { const r = await api('POST', '/api/relais'); S.topo.relais.push({ id: r.id, num: r.num, voies: [] }); if (S.sector !== 'all') S.sector = r.num > 30 ? 'all' : sectorOf(r.num); render(); return await load(); }
     if (a === 'delrel') { if (!confirm('Supprimer ce relais, toutes ses voies, leurs vidéos et sa photo ?')) return; await api('DELETE', `/api/relais/${v}`); return await load(); }
     if (a === 'addvoie') {
       const r = S.topo.relais.find(x => x.id == v);
@@ -497,6 +540,7 @@ document.addEventListener('change', async ev => {
   await load();
 });
 document.addEventListener('keydown', ev => {
+  if ((ev.key === 'Enter' || ev.key === ' ') && ev.target.classList && ev.target.classList.contains('wm-sec')) { ev.preventDefault(); ev.target.dispatchEvent(new MouseEvent('click', { bubbles: true })); return; } // secteur de la carte au clavier (les éléments SVG n'ont pas de méthode click())
   if (ev.key !== 'Enter') return;
   const id = ev.target.id;
   if (id === 'pw' || id === 'pseudo') document.querySelector('[data-act="login"]').click();
@@ -520,6 +564,7 @@ if ('serviceWorker' in navigator) {
     await load();
   });
 }
+loadMap();
 (async () => {
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch { } // demande au navigateur de ne pas effacer les données du téléphone
   const c = await TopoDB.get('kv', 'me');
