@@ -83,6 +83,9 @@ CREATE TABLE IF NOT EXISTS results(
 -- Actions envoyées par les téléphones (file hors ligne) : l'identifiant unique évite de comptabiliser deux fois une même action
 CREATE TABLE IF NOT EXISTS sync_actions(id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   type TEXT NOT NULL, result TEXT NOT NULL, created_at TEXT NOT NULL);
+-- Compteur d'essais par voie (cumulé sur toutes les sessions)
+CREATE TABLE IF NOT EXISTS voie_tries(user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  voie_id INTEGER NOT NULL REFERENCES voies(id) ON DELETE CASCADE, n INTEGER NOT NULL, PRIMARY KEY(user_id, voie_id));
 CREATE TABLE IF NOT EXISTS user_achievements(
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, key TEXT NOT NULL,
   unlocked_at TEXT NOT NULL, seen INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id, key));
@@ -95,6 +98,9 @@ if (!db.prepare("SELECT 1 FROM pragma_table_info('relais') WHERE name = 'photo'"
 
 if (!db.prepare("SELECT 1 FROM pragma_table_info('statuses') WHERE name = 'tries'").get())
   db.exec('ALTER TABLE statuses ADD COLUMN tries INTEGER NOT NULL DEFAULT 0; ALTER TABLE statuses ADD COLUMN worked_at TEXT');
+// Le statut « non réalisé » n'existe plus (une voie n'est pas réalisée par défaut) ; les essais passent dans leur propre table
+db.prepare('INSERT OR IGNORE INTO voie_tries(user_id, voie_id, n) SELECT user_id, voie_id, tries FROM statuses WHERE tries > 0').run();
+db.prepare("DELETE FROM statuses WHERE status = 'non'").run();
 
 // ---------- Fichiers envoyés (photos de relais, vidéos de voies) ----------
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(path.dirname(DB_PATH), 'uploads');
@@ -119,7 +125,9 @@ const uploadVideo = mkUpload('video', VID_TYPES, MAX_VIDEO_MB, 'MP4, MOV ou WebM
 
 const GRADES = ['4', '5', '6', '7', '8'].flatMap(n => ['a', 'a+', 'b', 'b+', 'c', 'c+'].map(l => n + l));
 const COLORS = ['rouge', 'orange', 'jaune', 'vert', 'bleu', 'violet', 'rose', 'noir', 'blanc', 'gris'];
-const STATUSES = ['avue', 'flash', 'apres', 'travail', 'non'];
+// « chute » (sortie avec chute) n'existe que pendant une session ; à la fin de la session elle devient « travail en cours »
+const STATUSES = ['avue', 'flash', 'apres', 'travail', 'chute'];
+const RANK = { avue: 4, flash: 3, apres: 2, travail: 1, chute: 1 }; // à vue > flash > après travail > travail en cours
 const DONE = ['avue', 'flash', 'apres'];
 const DONE_SQL = DONE.map(s => `'${s}'`).join(',');
 const gi = g => GRADES.indexOf(g);
@@ -275,7 +283,7 @@ app.get('/api/topo', auth, (req, res) => {
   const vals = map('SELECT voie_id k, COUNT(*) n FROM validations GROUP BY voie_id');
   const vids = map('SELECT voie_id k, COUNT(*) n FROM videos GROUP BY voie_id');
   const clm = map('SELECT voie_id k, COUNT(DISTINCT user_id) n FROM climbs WHERE voie_id IS NOT NULL GROUP BY voie_id');
-  const myDone = new Set(db.prepare(`SELECT voie_id FROM statuses WHERE user_id = ? AND status IN (${DONE_SQL})`).all(uid).map(r => r.voie_id)), scored = champ.scoredSet(uid);
+  const myDone = new Set(db.prepare('SELECT DISTINCT voie_id FROM climbs WHERE user_id = ? AND voie_id IS NOT NULL').all(uid).map(r => r.voie_id)), scored = champ.scoredSet(uid);
   const myVals = new Set(db.prepare('SELECT voie_id FROM validations WHERE user_id = ?').all(uid).map(r => r.voie_id));
   const contests = {};
   db.prepare('SELECT voie_id, grade, COUNT(*) n, SUM(user_id = ?) me FROM contests GROUP BY voie_id, grade ORDER BY n DESC').all(uid)
@@ -289,10 +297,11 @@ app.get('/api/topo', auth, (req, res) => {
   const relais = db.prepare('SELECT * FROM relais ORDER BY num').all().map(r => ({
     id: r.id, num: r.num, voies: voies[r.id] || [],
     photo: r.photo ? `/media/${r.photo}` : null, photo_mine: !!r.photo && r.photo_by === uid }));
-  const myRows = db.prepare('SELECT voie_id, status, tries FROM statuses WHERE user_id = ?').all(uid);
-  const my = Object.fromEntries(myRows.map(r => [r.voie_id, r.status])), tries = Object.fromEntries(myRows.map(r => [r.voie_id, r.tries]));
+  const my = Object.fromEntries(db.prepare('SELECT voie_id, status FROM statuses WHERE user_id = ?').all(uid).map(r => [r.voie_id, r.status])); // meilleur statut
+  const tries = Object.fromEntries(db.prepare('SELECT voie_id, n FROM voie_tries WHERE user_id = ?').all(uid).map(r => [r.voie_id, r.n]));
   const s = activeSession(uid);
-  res.json({ relais, my, tries, ach: ach.unseen(uid), champ: champ.unseen(uid), session: s ? { id: s.id } : null, total, limits: { photo: MAX_PHOTO_MB, video: MAX_VIDEO_MB } });
+  const sess = s ? Object.fromEntries(db.prepare('SELECT voie_id, status FROM ascents WHERE session_id = ? AND voie_id IS NOT NULL ORDER BY id').all(s.id).map(r => [r.voie_id, r.status])) : {}; // statuts de la session en cours
+  res.json({ relais, my, sess, tries, ach: ach.unseen(uid), champ: champ.unseen(uid), session: s ? { id: s.id } : null, total, limits: { photo: MAX_PHOTO_MB, video: MAX_VIDEO_MB } });
 });
 
 app.post('/api/relais', auth, opener, (req, res) => {
@@ -357,35 +366,47 @@ function addAscent(sessionId, uid, v, status, at) {
 // Actions du grimpeur : fonctions communes à l'API directe et à la synchronisation hors ligne (/api/sync).
 // `at` = date réelle de l'action (utile quand elle a été faite sans réseau).
 function getVoie(id) { const v = voieById(id); need(v, 'Voie introuvable', 404); return v; }
+// Pendant une session, chaque voie a son propre statut (remis à zéro à chaque session) : il est enregistré dans les ascensions de la session.
+function sessionStatus(uid, v, s, st, at) {
+  const rows = db.prepare('SELECT id, status FROM ascents WHERE session_id = ? AND voie_id = ? ORDER BY id').all(s.id, v.id);
+  const last = rows[rows.length - 1], prev = last ? last.status : null;
+  if (!st) { // décocher : on retire la voie de la session (et les réussites qu'elle avait enregistrées)
+    const wins = rows.filter(r => isDone(r.status)).length;
+    db.prepare('DELETE FROM ascents WHERE session_id = ? AND voie_id = ?').run(s.id, v.id);
+    if (wins) db.prepare('DELETE FROM climbs WHERE id IN (SELECT id FROM climbs WHERE user_id = ? AND voie_id = ? ORDER BY id DESC LIMIT ?)').run(uid, v.id, wins);
+    return;
+  }
+  if (last) db.prepare('UPDATE ascents SET status = ? WHERE id = ?').run(st, last.id); else addAscent(s.id, uid, v, st, at);
+  syncClimb(uid, v, prev, st, at);
+  if (isDone(st) && !isDone(prev)) champ.scoreClimb(uid, v, st, s.id, at); // points enregistrés à la validation de la réussite
+}
 const doStatus = db.transaction((uid, voieId, st, at) => {
-  const v = getVoie(voieId);
+  const v = getVoie(voieId), s = activeSession(uid);
+  need(!st || STATUSES.includes(st), 'Statut invalide');
+  if (s) return sessionStatus(uid, v, s, st || null, at);
+  // Hors session : correction directe du meilleur statut (la « sortie avec chute » ne se note que pendant une session)
+  need(st !== 'chute', 'La « sortie avec chute » se note pendant une session');
   const prev = (db.prepare('SELECT status FROM statuses WHERE user_id = ? AND voie_id = ?').get(uid, v.id) || {}).status;
   if (!st) {
     db.prepare('DELETE FROM statuses WHERE user_id = ? AND voie_id = ?').run(uid, v.id);
     return syncClimb(uid, v, prev, null, at);
   }
-  need(STATUSES.includes(st), 'Statut invalide');
   db.prepare(`INSERT INTO statuses(user_id, voie_id, status, updated_at, worked_at) VALUES(?,?,?,?,?)
     ON CONFLICT(user_id, voie_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at,
       worked_at = COALESCE(statuses.worked_at, excluded.worked_at)`).run(uid, v.id, st, at, st === 'travail' ? at : null);
   syncClimb(uid, v, prev, st, at);
-  const s = activeSession(uid);
-  if (isDone(st) && !isDone(prev)) champ.scoreClimb(uid, v, st, s && s.id, at); // points enregistrés à la validation de la réussite
-  if (s && st !== 'non') {
-    const last = db.prepare('SELECT id FROM ascents WHERE session_id = ? AND voie_id = ? ORDER BY id DESC LIMIT 1').get(s.id, v.id);
-    if (last) db.prepare('UPDATE ascents SET status = ? WHERE id = ?').run(st, last.id); else addAscent(s.id, uid, v, st, at);
-  }
+  if (isDone(st) && !isDone(prev)) champ.scoreClimb(uid, v, st, null, at);
 });
-const doTries = db.transaction((uid, voieId, tries) => { // compteur d'essais (utile pour « après travail »)
-  const n = Math.max(0, Math.min(99, parseInt(tries, 10) || 0));
-  need(db.prepare('UPDATE statuses SET tries = ? WHERE user_id = ? AND voie_id = ?').run(n, uid, voieId).changes, 'Choisissez d’abord un statut');
+const doTries = db.transaction((uid, voieId, tries) => { // compteur d'essais (cumulé sur toutes les sessions)
+  const v = getVoie(voieId), n = Math.max(0, Math.min(99, parseInt(tries, 10) || 0));
+  db.prepare('INSERT INTO voie_tries(user_id, voie_id, n) VALUES(?,?,?) ON CONFLICT(user_id, voie_id) DO UPDATE SET n = excluded.n').run(uid, v.id, n);
 });
 const doRepeat = db.transaction((uid, voieId, at) => { // « refaite pendant la session »
   const v = getVoie(voieId), s = activeSession(uid);
-  const st = db.prepare('SELECT status FROM statuses WHERE user_id = ? AND voie_id = ?').get(uid, v.id);
-  need(s && st && st.status !== 'non', 'Session et statut requis');
-  addAscent(s.id, uid, v, st.status, at);
-  if (isDone(st.status)) addClimb(uid, v, st.status, at);
+  const last = s && db.prepare('SELECT status FROM ascents WHERE session_id = ? AND voie_id = ? ORDER BY id DESC LIMIT 1').get(s.id, v.id);
+  need(last && isDone(last.status), 'Une réussite pendant la session est nécessaire');
+  addAscent(s.id, uid, v, last.status, at);
+  addClimb(uid, v, last.status, at);
 });
 const doValidate = db.transaction((uid, voieId) => { // une seule voix par personne : validation OU contestation
   const v = getVoie(voieId);
@@ -416,8 +437,21 @@ const doSessionStart = db.transaction((uid, at) => { if (!activeSession(uid)) db
 const doSessionEnd = db.transaction((uid, at) => {
   const s = activeSession(uid);
   if (!s) return;
-  if (db.prepare('SELECT COUNT(*) n FROM ascents WHERE session_id = ?').get(s.id).n === 0) db.prepare('DELETE FROM sessions WHERE id = ?').run(s.id);
-  else db.prepare('UPDATE sessions SET ended_at = ? WHERE id = ?').run(at, s.id);
+  const rows = db.prepare('SELECT voie_id, status FROM ascents WHERE session_id = ? AND voie_id IS NOT NULL ORDER BY id').all(s.id);
+  if (!db.prepare('SELECT COUNT(*) n FROM ascents WHERE session_id = ?').get(s.id).n) return void db.prepare('DELETE FROM sessions WHERE id = ?').run(s.id);
+  // Meilleur résultat de chaque voie dans la session (une chute compte comme « travail en cours »)
+  const best = new Map();
+  for (const r of rows) { const m = r.status === 'chute' ? 'travail' : r.status; if (!best.has(r.voie_id) || RANK[m] > RANK[best.get(r.voie_id)]) best.set(r.voie_id, m); }
+  // Fusion dans le meilleur statut enregistré : il ne baisse jamais (à vue > flash > après travail > travail en cours)
+  for (const [vid, m] of best) {
+    const cur = db.prepare('SELECT status FROM statuses WHERE user_id = ? AND voie_id = ?').get(uid, vid);
+    if (!cur) db.prepare('INSERT INTO statuses(user_id, voie_id, status, updated_at, worked_at) VALUES(?,?,?,?,?)').run(uid, vid, m, at, m === 'travail' ? at : null);
+    else {
+      if (RANK[m] > RANK[cur.status]) db.prepare('UPDATE statuses SET status = ?, updated_at = ? WHERE user_id = ? AND voie_id = ?').run(m, at, uid, vid);
+      if (m === 'travail') db.prepare('UPDATE statuses SET worked_at = COALESCE(worked_at, ?) WHERE user_id = ? AND voie_id = ?').run(at, uid, vid);
+    }
+  }
+  db.prepare('UPDATE sessions SET ended_at = ? WHERE id = ?').run(at, s.id);
 });
 const ok = (res) => res.json({ ok: true });
 app.put('/api/voies/:id/status', auth, wrap((req, res) => { doStatus(req.user.id, req.params.id, req.body.status || null, now()); ok(res); }));
@@ -558,7 +592,7 @@ app.get('/api/profile', auth, (req, res) => {
   const top = db.prepare(`SELECT a.grade, a.color, r.num rel, COUNT(*) n FROM ascents a JOIN voies v ON v.id = a.voie_id JOIN relais r ON r.id = v.relais_id
     WHERE a.user_id = ? AND a.status IN (${DONE_SQL}) GROUP BY a.voie_id ORDER BY n DESC, a.id DESC LIMIT 5`).all(uid);
   const best = bestOf(doneGrades().filter(r => r.uid === uid));
-  const sessions = db.prepare('SELECT * FROM sessions WHERE user_id = ? ORDER BY started_at DESC LIMIT 40').all(uid);
+  const sessions = db.prepare('SELECT * FROM sessions WHERE user_id = ? ORDER BY started_at DESC LIMIT 1000').all(uid);
   const byS = {};
   if (sessions.length) db.prepare(`SELECT session_id, grade, color, status FROM ascents WHERE session_id IN (${sessions.map(s => s.id).join(',')}) ORDER BY id`)
     .all().forEach(a => (byS[a.session_id] ||= []).push(a));

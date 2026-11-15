@@ -2,14 +2,18 @@
 const COL = { rouge: '#D6382F', orange: '#EE7B1E', jaune: '#F2C318', vert: '#3E9B4F', bleu: '#2F6FD0', violet: '#7B4BB5', rose: '#E86AA6', noir: '#1E1E1E', blanc: '#F4F4F2', gris: '#8A9199' };
 const CN = Object.keys(COL);
 const GR = ['4', '5', '6', '7', '8'].flatMap(n => ['a', 'a+', 'b', 'b+', 'c', 'c+'].map(l => n + l));
-const ST = [['avue', 'À vue'], ['flash', 'Flash'], ['apres', 'Après travail'], ['travail', 'Travail en cours'], ['non', 'Non réalisé']];
+const ST = [['avue', 'À vue'], ['flash', 'Flash'], ['apres', 'Après travail'], ['travail', 'Travail en cours']]; // meilleur statut enregistré
+const SST = [...ST, ['chute', 'Sortie avec chute']]; // statuts d'une session (la chute devient « travail en cours » en fin de session)
+const RANK = { avue: 4, flash: 3, apres: 2, travail: 1, chute: 1 }; // à vue > flash > après travail > travail en cours
 const DONE = ['avue', 'flash', 'apres'];
 const ROLES = [['user', 'Grimpeur'], ['opener', 'Ouvreur'], ['admin', 'Admin']];
-const S = { offline: false, pending: 0, pendV: new Set(), missing: false, user: null, tab: 'topo', open: null, draft: null, admin: false, auth: 'in', err: '', topo: null, profile: null, club: null, members: null, comments: [], videos: [], zoom: null, ach: null, newAch: null, clubTab: 'champ', fl: [], champ: null, hall: null, newChamp: null };
+const S = { monthOpen: {}, offline: false, pending: 0, pendV: new Set(), missing: false, user: null, tab: 'topo', open: null, draft: null, admin: false, auth: 'in', err: '', topo: null, profile: null, club: null, members: null, comments: [], videos: [], zoom: null, ach: null, newAch: null, clubTab: 'champ', fl: [], champ: null, hall: null, newChamp: null };
 
 const e = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const ci = g => GR.indexOf(g);
-const lbl = s => (ST.find(x => x[0] === s) || [])[1];
+const lbl = s => (SST.find(x => x[0] === s) || [])[1];
+// Statut affiché : celui de la session en cours (remis à zéro à chaque session), sinon le meilleur statut enregistré
+const stOf = id => (S.topo ? (S.topo.session ? S.topo.sess : S.topo.my)[id] : undefined);
 const fg = c => ['jaune', 'blanc', 'orange'].includes(c) ? '#1A1A1A' : '#fff';
 const val = id => (document.getElementById(id) || {}).value;
 const canEdit = () => S.admin && S.user && ['opener', 'admin'].includes(S.user.role);
@@ -69,15 +73,22 @@ function applyLocal(a) {
   const t = S.topo, p = S.profile, v = a.voieId ? rawVoie(a.voieId) : null;
   if (!t) return;
   if (a.voieId && !v) return;
+  if (!t.sess) t.sess = {};
   switch (a.type) {
     case 'status':
-      if (a.status) t.my[v.id] = a.status; else { delete t.my[v.id]; delete t.tries[v.id]; }
-      if (t.session && a.status && a.status !== 'non' && p && p.session && !p.session.asc.some(x => x._v === v.id))
-        p.session.asc.push({ grade: v.grade, color: v.color, status: a.status, _v: v.id });
-      else if (p && p.session && a.status) { const l = [...p.session.asc].reverse().find(x => x._v === v.id); if (l) l.status = a.status; }
+      if (t.session) { // pendant une session : statut de la session uniquement
+        if (a.status) t.sess[v.id] = a.status; else delete t.sess[v.id];
+        if (p && p.session) {
+          const rows = p.session.asc, i = rows.map(x => x._v).lastIndexOf(v.id);
+          if (!a.status) p.session.asc = rows.filter(x => x._v !== v.id);
+          else if (i >= 0) rows[i].status = a.status;
+          else rows.push({ grade: v.grade, color: v.color, status: a.status, _v: v.id });
+        }
+      } else if (a.status) { if (a.status !== 'chute') t.my[v.id] = a.status; } // hors session : correction du meilleur statut
+      else delete t.my[v.id];
       break;
     case 'tries': t.tries[v.id] = Math.max(0, Math.min(99, Number(a.tries) || 0)); break;
-    case 'repeat': if (p && p.session) p.session.asc.push({ grade: v.grade, color: v.color, status: t.my[v.id], _v: v.id }); break;
+    case 'repeat': if (t.session && DONE.includes(t.sess[v.id]) && p && p.session) p.session.asc.push({ grade: v.grade, color: v.color, status: t.sess[v.id], _v: v.id }); break;
     case 'validate':
       if (v.vme) { v.vme = false; v.validations = Math.max(0, v.validations - 1); }
       else {
@@ -95,9 +106,13 @@ function applyLocal(a) {
       v.contests = v.contests.filter(x => x.n > 0); break;
     }
     case 'comment': if (S.open == a.voieId && S.comments) S.comments.push({ id: 'local-' + a.id, pseudo: S.user.pseudo, text: a.text, created_at: a.at, mine: true }); break;
-    case 'session_start': t.session = { id: 'local' }; if (p) p.session = { id: 'local', started: a.at, asc: [] }; break;
+    case 'session_start': t.session = { id: 'local' }; t.sess = {}; if (p) p.session = { id: 'local', started: a.at, asc: [] }; break;
     case 'session_end':
-      t.session = null;
+      if (t.session) for (const [vid, st] of Object.entries(t.sess)) { // fusion : le meilleur statut ne baisse jamais
+        const m = st === 'chute' ? 'travail' : st, cur = t.my[vid];
+        if (!cur || RANK[m] > RANK[cur]) t.my[vid] = m;
+      }
+      t.session = null; t.sess = {};
       if (p && p.session) { if (p.session.asc.length) p.sessions.unshift({ id: 'local-' + a.id, started: p.session.started, ended: a.at, asc: p.session.asc }); p.session = null; }
       break;
   }
@@ -202,8 +217,8 @@ function wheel(sel) {
 }
 
 function voieRow(v) {
-  const m = S.topo.my[v.id];
-  return `<button class="v" data-act="open" data-v="${v.id}"><span class="dot" style="background:${COL[v.color]}"></span><b>${v.grade}</b><span class="n">${e(v.name || v.color[0].toUpperCase() + v.color.slice(1))}${v.setter ? ' · ' + e(v.setter) : ''}${v.videos ? ' · 🎥 ' + v.videos : ''}</span><span class="pts" title="Points de la voie">${S.pendV.has(v.id) ? '⏳' : v.scored ? '✓' : '⭐ ' + v.pts}</span>${m && m !== 'non' ? `<span class="st ${m}">${lbl(m)}</span>` : `<span class="mut">${v.pct}%</span>`}</button>`;
+  const m = stOf(v.id);
+  return `<button class="v" data-act="open" data-v="${v.id}"><span class="dot" style="background:${COL[v.color]}"></span><b>${v.grade}</b><span class="n">${e(v.name || v.color[0].toUpperCase() + v.color.slice(1))}${v.setter ? ' · ' + e(v.setter) : ''}${v.videos ? ' · 🎥 ' + v.videos : ''}</span><span class="pts" title="Points de la voie">${S.pendV.has(v.id) ? '⏳' : v.scored ? '✓' : '⭐ ' + v.pts}</span>${m ? `<span class="st ${m}">${lbl(m)}</span>` : `<span class="mut">${v.pct}%</span>`}</button>`;
 }
 
 function photoBlock(r) {
@@ -211,10 +226,17 @@ function photoBlock(r) {
   return `${r.photo ? `<img class="rph" src="${r.photo}" alt="Photo du relais ${r.num}" loading="lazy" data-act="zoom" data-v="${r.photo}">` : ''}<div class="rup"><label class="chip">${r.photo ? '📷 Changer la photo' : '📷 Ajouter une photo du relais'}<input type="file" accept="image/*" class="vh" data-up="photo" data-id="${r.id}"></label>${r.photo && can ? `<button class="chip" data-act="delphoto" data-v="${r.id}">Supprimer la photo</button>` : ''}</div>`;
 }
 
+function sessionBar() {
+  const t = S.topo;
+  return t.session
+    ? `<div class="sessbar on"><span>🧗 <b>Session en cours</b> · ${Object.keys(t.sess).length} voie(s) notée(s) · statuts remis à zéro</span><button class="chip" data-act="endsess">Terminer</button></div>`
+    : `<div class="sessbar"><span class="mut">Aucune session en cours : les statuts affichent votre meilleur résultat.</span><button class="chip" data-act="startsess">▶ Démarrer une session</button></div>`;
+}
+
 function topo() {
   const lv = S.fl;
   const rs = S.topo.relais.map(r => ({ ...r, voies: lv.length ? r.voies.filter(v => lv.includes(v.grade[0])) : r.voies })).filter(r => !lv.length || r.voies.length);
-  return `<div class="bar" role="group" aria-label="Filtrer par niveau"><button class="chip ${lv.length ? '' : 'on'}" data-act="fl" data-v="">Tous</button>${['4', '5', '6', '7', '8'].map(n => `<button class="chip ${lv.includes(n) ? 'on' : ''}" data-act="fl" data-v="${n}" aria-pressed="${lv.includes(n)}">${n}</button>`).join('')}${canEdit() ? `<button class="btn" style="margin-left:auto" data-act="addrel">+ Relais</button>` : ''}</div>
+  return `${sessionBar()}<div class="bar" role="group" aria-label="Filtrer par niveau"><button class="chip ${lv.length ? '' : 'on'}" data-act="fl" data-v="">Tous</button>${['4', '5', '6', '7', '8'].map(n => `<button class="chip ${lv.includes(n) ? 'on' : ''}" data-act="fl" data-v="${n}" aria-pressed="${lv.includes(n)}">${n}</button>`).join('')}${canEdit() ? `<button class="btn" style="margin-left:auto" data-act="addrel">+ Relais</button>` : ''}</div>
   <div class="grid">${rs.map(r => `<section class="rel"><header><h3>Relais ${r.num}</h3>${canEdit() ? `<button class="btn del" style="padding:4px 10px;font-size:12px" data-act="delrel" data-v="${r.id}">Supprimer</button>` : ''}</header>${photoBlock(r)}${r.voies.map(voieRow).join('') || '<p class="mut" style="padding:0 14px">Aucune voie.</p>'}${canEdit() ? `<button class="add" data-act="addvoie" data-v="${r.id}">+ Ajouter une voie</button>` : ''}</section>`).join('')}</div>${rs.length ? '' : `<p class="mut">${S.topo.relais.length ? 'Aucune voie dans ces niveaux.' : 'Le mur est vide.' + (isOpener() ? ' Activez le mode ouvreur pour ajouter un relais.' : '')}</p>`}`;
 }
 
@@ -222,14 +244,14 @@ function sheet() {
   const d = S.draft;
   const v = d ? { ...d } : findV(S.open);
   if (!v) return '';
-  const m = S.topo.my[v.id];
+  const m = stOf(v.id), inSess = !!S.topo.session, best = S.topo.my[v.id];
   const rel = v.rel;
   const body = d
     ? `<div class="sb"><h3>${d.id ? 'Modifier la voie' : 'Nouvelle voie'}</h3>${wheel(d.color)}<select id="egrade">${GR.map(c => `<option ${c === d.grade ? 'selected' : ''}>${c}</option>`).join('')}</select><div class="row" style="margin-top:8px"><input type="text" id="ename" placeholder="Nom de la voie (facultatif)" maxlength="40" value="${e(d.name)}"><input type="text" id="esetter" placeholder="Ouvreur" maxlength="30" value="${e(d.setter)}"></div><div class="row" style="margin-top:10px"><button class="btn" data-act="saveedit">Enregistrer</button><button class="btn sec" data-act="canceledit">Annuler</button>${d.id ? `<button class="btn del" data-act="delvoie" style="margin-left:auto">Supprimer</button>` : ''}</div></div>`
     : `<div class="sb"><div class="row" style="align-items:center"><span class="mut" style="flex:1">Ouverte par <b style="color:var(--ink)">${e(v.setter || '—')}</b></span>${canEdit() ? `<button class="btn sec" data-act="edit">Modifier</button>` : ''}</div></div>
-  <div class="sb"><h3>Mon statut</h3><div class="sts">${ST.map(s => `<button class="chip ${m === s[0] ? 'on' : ''}" data-act="stat" data-v="${s[0]}">${s[1]}</button>`).join('')}</div>${S.pendV.has(v.id) ? '<p class="mut" style="margin:8px 0 0">⏳ Enregistré sur le téléphone, en attente de synchronisation.</p>' : ''}${m === 'travail' || m === 'apres' ? `<div class="row" style="align-items:center;margin-top:8px"><span class="mut" style="flex:1">Essais : <b style="color:var(--ink)">${S.topo.tries[v.id] || 0}</b></span><button class="chip" data-act="tries" data-v="-1" aria-label="Un essai de moins">−</button><button class="chip" data-act="tries" data-v="1">+1 essai</button></div>` : ''}${S.topo.session ? `<p class="mut" style="margin:8px 0 0">Session en cours : l’ascension est ajoutée automatiquement.${m && m !== 'non' ? ` <button class="chip" data-act="repeat">+ Refaite pendant la session</button>` : ''}</p>` : ''}</div>
+  <div class="sb"><h3>${inSess ? 'Statut de cette session' : 'Mon meilleur statut'}</h3>${inSess && best ? `<p class="mut" style="margin:0 0 8px">Meilleur statut enregistré : <b style="color:var(--ink)">${lbl(best)}</b>. Il ne baisse jamais, même après une chute.</p>` : ''}<div class="sts">${(inSess ? SST : ST).map(s => `<button class="chip ${m === s[0] ? 'on' : ''}" data-act="stat" data-v="${s[0]}">${s[1]}</button>`).join('')}</div>${!inSess ? '<p class="mut" style="margin:8px 0 0">Pour noter vos tentatives du jour sans toucher à votre meilleur statut : <button class="chip" data-act="startsess">▶ démarrer une session</button></p>' : ''}${S.pendV.has(v.id) ? '<p class="mut" style="margin:8px 0 0">⏳ Enregistré sur le téléphone, en attente de synchronisation.</p>' : ''}${['travail', 'apres', 'chute'].includes(m) ? `<div class="row" style="align-items:center;margin-top:8px"><span class="mut" style="flex:1">Essais : <b style="color:var(--ink)">${S.topo.tries[v.id] || 0}</b></span><button class="chip" data-act="tries" data-v="-1" aria-label="Un essai de moins">−</button><button class="chip" data-act="tries" data-v="1">+1 essai</button></div>` : ''}${S.topo.session ? `<p class="mut" style="margin:8px 0 0">Session en cours : ce statut ne vaut que pour aujourd’hui.${DONE.includes(m) ? ` <button class="chip" data-act="repeat">+ Refaite pendant la session</button>` : ''}</p>` : ''}</div>
   <div class="sb"><h3>Réussite du club</h3><div class="meter"><i style="width:${v.pct}%"></i></div><span class="mut">${v.pct} % des grimpeurs ont réalisé cette voie</span></div>
-  <div class="sb"><h3>Points du championnat</h3>${v.scored ? '<p class="mut" style="margin:0">Voie déjà marquée ce mois-ci ✓ (les répétitions ne rapportent pas de points).</p>' : `<p style="margin:0"><b>${v.pts} pts</b> <span class="mut">· base ${v.base} × ${String(v.coef).replace('.', ',')} (${v.climbers} réussite${v.climbers > 1 ? 's' : ''}) · +20 % si réussie du premier coup</span></p>`}</div>
+  <div class="sb"><h3>Points du championnat</h3>${v.scored ? '<p class="mut" style="margin:0">Déjà marquée aujourd’hui ✓ — elle rapportera de nouveau des points dans une prochaine session (une fois par jour).</p>' : `<p style="margin:0"><b>${v.pts} pts</b> <span class="mut">· base ${v.base} × ${String(v.coef).replace('.', ',')} (${v.climbers} réussite${v.climbers > 1 ? 's' : ''}) · +20 % si réussie du premier coup · points à chaque nouvelle session</span></p>`}</div>
   <div class="sb"><h3>Cotation</h3><button class="chip ${v.vme ? 'on' : ''}" data-act="valid">✓ Cotation validée · ${v.validations}</button></div>
   <div class="sb"><h3>Cotation contestée ?</h3>${v.contests.map(c => `<div class="row" style="align-items:center;margin-bottom:6px"><span style="flex:1"><b>${c.grade}</b> <span class="mut">· ${c.n} pers.</span></span><button class="chip ${c.me ? 'on' : ''}" data-act="vote" data-v="${c.grade}">D’accord</button></div>`).join('')}<div class="row" style="margin-top:8px"><select id="pcot">${GR.filter(c => c !== v.grade).map(c => `<option>${c}</option>`).join('')}</select><button class="btn sec" style="white-space:nowrap" data-act="contest">Proposer</button></div></div>
   <div class="sb"><h3>Vidéos</h3>${S.videos.map(x => `<div style="margin-bottom:12px"><video controls playsinline preload="metadata" src="${x.url}" style="width:100%;max-height:60vh;border-radius:10px;background:#000"></video><div class="row" style="align-items:center"><span class="mut" style="flex:1">${e(x.pseudo)} · ${new Date(x.created_at).toLocaleDateString('fr-FR')}</span>${x.mine || isOpener() ? `<button class="chip" data-act="delvideo" data-v="${x.id}">Supprimer</button>` : ''}</div></div>`).join('') || '<p class="mut">Aucune vidéo pour cette voie.</p>'}${S.offline ? '<p class="mut">Les vidéos nécessitent une connexion.</p>' : ''}<label class="chip">🎥 Ajouter une vidéo de ma réalisation<input type="file" accept="video/*" class="vh" data-up="video" data-id="${v.id}"></label></div>
@@ -239,12 +261,40 @@ function sheet() {
 }
 
 function sessionChips(list) {
-  return list.map(a => `<span class="chip" style="display:inline-flex;gap:6px;align-items:center"><span class="dot" style="width:12px;height:12px;background:${COL[a.color]}"></span>${a.grade}${a.status === 'travail' ? '…' : ''}</span>`).join('');
+  return list.map(a => `<span class="chip" style="display:inline-flex;gap:6px;align-items:center"><span class="dot" style="width:12px;height:12px;background:${COL[a.color]}"></span>${a.grade}</span>`).join('');
+}
+// Les voies d'une session, rangées par statut
+const catHtml = rows => SST.map(([k, label]) => {
+  const r = rows.filter(x => x.status === k);
+  return r.length ? `<div style="margin-top:10px"><div class="mut"><b style="color:var(--ink)">${label}</b> · ${r.length}</div><div class="sts" style="margin-top:4px">${sessionChips(r)}</div></div>` : '';
+}).join('');
+const monthKey = iso => { const d = new Date(iso); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
+const monthLabel = k => new Date(+k.slice(0, 4), +k.slice(5) - 1, 1).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
+function sessionsChart(list) { // nombre de sessions par mois, sur les 12 derniers mois
+  const now = new Date(), months = [];
+  for (let i = 11; i >= 0; i--) { const d = new Date(now.getFullYear(), now.getMonth() - i, 1); months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`); }
+  const n = Object.fromEntries(months.map(m => [m, 0])); list.forEach(s => { const k = monthKey(s.started); if (k in n) n[k]++; });
+  const max = Math.max(1, ...Object.values(n)), W = 312, H = 120, bw = 18, slot = W / 12, base = H - 16, top = 16;
+  const bars = months.map((m, i) => {
+    const h = Math.round(n[m] / max * (base - top)), x = i * slot + (slot - bw) / 2, cx = i * slot + slot / 2;
+    const lab = new Date(+m.slice(0, 4), +m.slice(5) - 1, 1).toLocaleDateString('fr-FR', { month: 'short' }).replace('.', '');
+    return `${n[m] ? `<rect class="bar" x="${x}" y="${base - h}" width="${bw}" height="${h}" rx="3"/><text class="cnt" x="${cx}" y="${base - h - 4}">${n[m]}</text>` : ''}<text x="${cx}" y="${H - 3}">${lab}</text>`;
+  }).join('');
+  const total = Object.values(n).reduce((a, b) => a + b, 0);
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Sessions par mois sur 12 mois : ${total} au total"><line x1="0" y1="${base}" x2="${W}" y2="${base}"/>${bars}</svg>`;
+}
+function sessionCard(s) {
+  const done = s.asc.filter(x => DONE.includes(x.status)).length;
+  return `<div class="box"><div class="row" style="align-items:center"><b style="flex:1">${dateFr(s.started)}</b><button class="chip" data-act="delsess" data-v="${s.id}">Supprimer</button></div><div class="mut">${done} réussite${done > 1 ? 's' : ''} · ${s.asc.length} voie${s.asc.length > 1 ? 's' : ''} notée${s.asc.length > 1 ? 's' : ''}</div>${catHtml(s.asc)}</div>`;
 }
 function sessionView() {
-  const p = S.profile, a = p.session;
-  return `<div class="box"><h2 style="font-size:22px;margin-bottom:8px">${a ? 'Session en cours' : 'Nouvelle session'}</h2>${a ? `<div class="sts" style="margin-bottom:12px">${sessionChips(a.asc) || '<span class="mut">Ouvrez une voie et choisissez un statut pour l’ajouter.</span>'}</div><button class="btn" data-act="endsess">Terminer la session</button>` : `<p class="mut" style="margin-top:0">Démarrez une session, puis notez vos voies depuis le topo.</p><button class="btn" data-act="startsess">Démarrer</button>`}</div>
-  <h3 style="margin:18px 0 10px">Sessions passées</h3>${p.sessions.map(s => `<div class="box"><div class="row" style="align-items:center"><b style="flex:1">${dateFr(s.started)}</b><button class="chip" data-act="delsess" data-v="${s.id}">Supprimer</button></div><div class="mut" style="margin:2px 0 8px">${s.asc.filter(x => DONE.includes(x.status)).length} ascension(s)</div><div class="sts">${sessionChips(s.asc)}</div></div>`).join('') || '<p class="mut">Aucune session terminée pour le moment.</p>'}`;
+  const p = S.profile, a = p.session, list = p.sessions;
+  const groups = {}; list.forEach(s => (groups[monthKey(s.started)] ||= []).push(s));
+  const keys = Object.keys(groups).sort().reverse();
+  const open = k => S.monthOpen[k] ?? (k === keys[0]); // le mois le plus récent est ouvert par défaut
+  return `<div class="box"><h2 style="font-size:22px;margin-bottom:8px">${a ? 'Session en cours' : 'Nouvelle session'}</h2>${a ? `<div style="margin-bottom:12px">${catHtml(a.asc) || '<span class="mut">Ouvrez une voie dans le topo et choisissez son statut pour cette session.</span>'}</div><button class="btn" data-act="endsess">Terminer la session</button>` : `<p class="mut" style="margin-top:0">Au démarrage, les statuts de toutes les voies sont remis à zéro pour la session. À la fin, votre meilleur statut de chaque voie est conservé.</p><button class="btn" data-act="startsess">Démarrer</button>`}</div>
+  <div class="box"><h3 style="margin-bottom:8px">Sessions par mois</h3>${sessionsChart(list)}</div>
+  <h3 style="margin:18px 0 6px">Sessions passées</h3>${keys.map(k => `<section class="month"><button class="mh" data-act="mon" data-v="${k}" aria-expanded="${open(k)}"><span class="chev">${open(k) ? '▾' : '▸'}</span><b style="flex:1;text-transform:capitalize">${monthLabel(k)}</b><span class="mut">${groups[k].length} session${groups[k].length > 1 ? 's' : ''}</span></button>${open(k) ? groups[k].map(sessionCard).join('') : ''}</section>`).join('') || '<p class="mut">Aucune session terminée pour le moment.</p>'}`;
 }
 
 const standalone = () => (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
@@ -311,7 +361,7 @@ function champView() {
   <div class="grid"><div class="box"><h3 style="margin-bottom:8px">Classement du mois</h3>${rows || '<p class="mut" style="margin:0">Personne n’a encore marqué de points ce mois-ci. À vous de jouer !</p>'}</div>
   <div class="box"><h3 style="margin-bottom:8px">Mes derniers points</h3>${me.entries.map(x => `<div class="row" style="padding:4px 0"><span style="flex:1" class="mut">${e(x.label)}</span><b>+${x.points}</b></div>`).join('') || '<p class="mut" style="margin:0">Réussissez une voie pour marquer vos premiers points.</p>'}</div>
   <div class="box"><h3 style="margin-bottom:8px">Explorateurs du mois</h3>${small(c.explorers, x => x.n + ' voies')}<h3 style="margin:14px 0 8px">Premières ascensions</h3>${small(c.firsts, x => x.n)}</div></div>
-  <details class="box"><summary>Comment sont calculés les points ?</summary><p class="mut">Chaque voie vaut des <b>points de base</b> selon sa cotation (4 : 10 · 5 : 20 · 6a-6b+ : 35 · 6c-7a+ : 50 · 7b-7c+ : 70 · 8a et + : 100), multipliés par un <b>coefficient de popularité</b> : plus la voie a été réussie par de membres différents, moins elle rapporte (de ×2 pour une voie peu réussie à ×0,25 au-delà de 100 réussites). Une voie vaut toujours au moins 5 points. Les répétitions ne comptent pas, et une voie ne rapporte qu’une fois par mois.</p><p class="mut"><b>Bonus :</b> +20 % si réussie du premier coup (à vue ou flash) · +30 pts première ascension de la voie · +30 pts à l’ouvreur quand quelqu’un réussit sa voie pour la première fois · +50 pts pour une cotation supérieure à votre meilleure · +30 pts pour 5 nouvelles voies dans une séance, +75 pts pour 10.</p><p class="mut">Les points sont figés au moment de la réussite. À la fin du mois, le podium reçoit une médaille et les compteurs repartent à zéro.</p></details>
+  <details class="box"><summary>Comment sont calculés les points ?</summary><p class="mut">Chaque voie vaut des <b>points de base</b> selon sa cotation (4 : 10 · 5 : 20 · 6a-6b+ : 35 · 6c-7a+ : 50 · 7b-7c+ : 70 · 8a et + : 100), multipliés par un <b>coefficient de popularité</b> : plus la voie a été réussie par de membres différents, moins elle rapporte (de ×2 pour une voie peu réussie à ×0,25 au-delà de 100 réussites). Une voie vaut toujours au moins 5 points. <b>Une voie rapporte des points à chaque nouvelle session où vous la réussissez</b>, mais une seule fois par jour ; la répéter dans la même session ne rapporte rien. Les bonus de séance (5 et 10 nouvelles voies) ne comptent que les voies pas encore réussies ce mois-ci.</p><p class="mut"><b>Bonus :</b> +20 % si réussie du premier coup (à vue ou flash) · +30 pts première ascension de la voie · +30 pts à l’ouvreur quand quelqu’un réussit sa voie pour la première fois · +50 pts pour une cotation supérieure à votre meilleure · +30 pts pour 5 nouvelles voies dans une séance, +75 pts pour 10.</p><p class="mut">Les points sont figés au moment de la réussite. À la fin du mois, le podium reçoit une médaille et les compteurs repartent à zéro.</p></details>
   ${c.past.length ? `<h3 style="margin:18px 0 10px">Championnats passés</h3><div class="grid">${c.past.map(p => `<div class="box"><b>${periodLabel(p.period)}</b>${p.podium.map(r => `<div class="row" style="padding:4px 0"><span style="flex:1">${medalIcon(r.medal)} ${e(r.pseudo)}</span><b>${r.points} pts</b></div>`).join('')}</div>`).join('')}</div>` : ''}`;
 }
 
@@ -373,6 +423,7 @@ document.addEventListener('click', async ev => {
     if (a === 'delsess') { if (!confirm('Supprimer cette session ? Ses ascensions ne compteront plus dans vos statistiques (les statuts de vos voies restent).')) return; await api('DELETE', `/api/sessions/${v}`); return await load(); }
     if (a === 'ackach') { S.newAch = null; render(); await api('POST', '/api/achievements/seen'); return; }
     if (a === 'tries') return await act({ type: 'tries', voieId: id, tries: Math.max(0, (S.topo.tries[id] || 0) + Number(v)) });
+    if (a === 'mon') { S.monthOpen[v] = t.getAttribute('aria-expanded') !== 'true'; return render(); }
     if (a === 'retry') { toast('Nouvelle tentative…'); await recover(); toast(''); return; }
     if (a === 'dlwall') return await downloadWall();
     if (a === 'install') { if (installEvt) { installEvt.prompt(); installEvt = null; } return render(); }
@@ -413,7 +464,7 @@ document.addEventListener('click', async ev => {
       S.draft = null; return await load();
     }
     if (a === 'delvoie') { if (!confirm('Supprimer cette voie ? Ses vidéos et la photo de son relais seront aussi supprimées.')) return; await api('DELETE', `/api/voies/${S.draft.id}`); S.open = null; S.draft = null; return await load(); }
-    if (a === 'stat') return await act({ type: 'status', voieId: id, status: S.topo.my[id] === v ? null : v });
+    if (a === 'stat') return await act({ type: 'status', voieId: id, status: stOf(id) === v ? null : v });
     if (a === 'repeat') return await act({ type: 'repeat', voieId: id });
     if (a === 'valid') return await act({ type: 'validate', voieId: id });
     if (a === 'vote') return await act({ type: 'contest', voieId: id, grade: v });

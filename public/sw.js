@@ -1,7 +1,7 @@
 'use strict';
 // Service worker : permet d'ouvrir l'appli sans réseau et synchronise les actions en attente (Background Sync, quand le navigateur le permet).
 importScripts('/idb.js');
-const VERSION = 'v2'; // à changer quand les fichiers de l'appli évoluent (nettoie l'ancien cache)
+const VERSION = 'v4'; // à changer quand les fichiers de l'appli évoluent (nettoie l'ancien cache)
 const SHELL = 'topo-shell-' + VERSION, MEDIA = 'topo-media', FONTS = 'topo-fonts';
 const SHELL_FILES = ['/', '/index.html', '/style.css', '/app.js', '/idb.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
 

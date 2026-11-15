@@ -102,7 +102,8 @@ module.exports = function (db, { GRADES, DONE_SQL }) {
           (SELECT 1 FROM statuses s WHERE s.user_id = ? AND s.voie_id = v.id AND s.status IN (${DONE_SQL})))`, uid),
       colors: new Set(cl.map(r => r.color)).size, grades: new Set(cl.map(r => r.grade)).size,
       firstTry: cl.filter(r => r.status === 'avue' || r.status === 'flash').length, flashes: cl.filter(r => r.status === 'flash').length,
-      persevere: one("SELECT COUNT(*) FROM statuses WHERE user_id = ? AND status = 'apres' AND tries >= 10", uid),
+      persevere: one(`SELECT COUNT(*) FROM statuses s JOIN voie_tries t ON t.user_id = s.user_id AND t.voie_id = s.voie_id
+        WHERE s.user_id = ? AND s.status IN (${DONE_SQL}) AND t.n >= 10`, uid),
       returnee: one(`SELECT COUNT(*) FROM statuses WHERE user_id = ? AND status IN (${DONE_SQL}) AND worked_at IS NOT NULL AND substr(worked_at, 1, 10) < substr(updated_at, 1, 10)`, uid),
       hunter: !!one(`SELECT 1 FROM climbs c JOIN voies v ON v.id = c.voie_id WHERE c.user_id = ?
         AND julianday(c.created_at) - julianday(v.created_at) <= 14
